@@ -70,6 +70,9 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
+
+        start = time.time()
+
         if index in self.cache_sample:
             sample, target, _, _ = self.cache_sample[index]
             # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
@@ -89,7 +92,9 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         if self.target_transform is not None:
             target = self.target_transform(target)
 
-        return index, sample, target
+        end = time.time()
+
+        return index, sample, target, (end-start)
 
     def _cache(self, idx, sample, target, reuse_factor=0, loss=0):
         #self.cache_sample[idx] = [ memoryview(sample.numpy()), memoryview(array.array('I', [target])), reuse_factor, abs(loss) ]
