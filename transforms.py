@@ -52,8 +52,14 @@ basic_transform = transforms.Compose([
   transforms.Resize((224,224)),   #transforms.RandomCrop(224, padding=4),
   #transforms.RandomHorizontalFlip(),
   transforms.PILToTensor(), #transforms.ToTensor(),
-  transforms.ToDtype(torch.float32),
+  transforms.ToDtype(torch.float32, scale=True),
   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
+
+valset_transform = transforms.Compose([
+  transforms.Resize((224,224)),
+  transforms.PILToTensor(),
+  transforms.ToDtype(torch.float32, scale=True),
 ])
 
 # ------
