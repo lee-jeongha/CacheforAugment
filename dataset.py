@@ -38,7 +38,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
     def __init__(
         self,
         root: str,
-        cache_len: Optional[int] = None,
+        cache_ratio: Optional[float] = None,
         transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         transform_block: Optional[Callable] = None,
@@ -55,7 +55,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         )
         self.imgs = self.samples
         self.transform_block = transform_block
-        self.cache_len = cache_len
+        self.cache_len = int(len(self) * cache_ratio)
         self.cache_sample = dict()          # {‘index’: (memoryview(data), memoryview(target), reuse_factor, abs(loss))}
         self.evict_candidates_heap = []     # [ (-abs(loss), index) ] -> min heap
         self.idx_to_be_dismissed = set()    # { index }
@@ -103,7 +103,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         if -abs(loss) < self.max_loss_candidates:
             return
-        
+
         # TODO: if already in `idx_to_be_dismissed` -> update?
 
         elif idx not in self.cache_sample:
@@ -149,7 +149,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             self._cache(idx, sample, target, 0, loss)
 
 
-    def make_evict_candidates(self, min_reuse_factor, evict_num):
+    def make_evict_candidates(self, min_reuse_factor, evict_ratio):
         '''
         0. `use_factor update()` for the remaining ones in `self.idx_to_be_dismissed`
         1. Making heap by scanning all the elements in `self.cache_sample`: that `reuse_factor` exceeds min value
@@ -163,13 +163,13 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             if (v[2] >= min_reuse_factor):
                 #heapq.heappush(scan_evict_indices_heap, (v[2], v[3], k))
                 scan_evict_indices_heap.append((v[2], v[3], k))
-        evict_candidates_heap = heapq.nlargest(evict_num, scan_evict_indices_heap)
+        evict_candidates_heap = heapq.nlargest(int(self.cache_len * evict_ratio), scan_evict_indices_heap)
 
         self.evict_candidates_heap = [(-i[1], i[2]) for i in evict_candidates_heap]
         heapq.heapify(self.evict_candidates_heap)
         self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
         self.max_loss_candidates = self.evict_candidates_heap[0][0] if len(self.evict_candidates_heap) > 0 else -(10**9)
-        
+
         del scan_evict_indices_heap, evict_candidates_heap
         gc.collect()    # invoke garbage collector manually
 
