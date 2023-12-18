@@ -14,16 +14,9 @@ from torch.utils.data._utils.worker import _generate_state, _ResumeIteration, _I
 
 def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue, done_event,
                                  auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
-                                 num_workers, persistent_workers, shared_seed, is_multithread):#,
-                                 #_cache_sample, _evict_candidates_heap, _idx_to_be_dismissed):
+                                 num_workers, persistent_workers, shared_seed, is_multithread):
     # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on the
     # logic of this function.
-
-    '''print(type(dataset.cache_sample), type(dataset.evict_candidates_heap), type(dataset.idx_to_be_dismissed))
-    dataset.cache_sample = _cache_sample
-    dataset.evict_candidates_heap = _evict_candidates_heap
-    dataset.idx_to_be_dismissed = _idx_to_be_dismissed
-    print(type(dataset.cache_sample), type(dataset.evict_candidates_heap), type(dataset.idx_to_be_dismissed))'''
 
     try:
         # Initialize C side signal handlers for SIGBUS and SIGSEGV. Python signal
