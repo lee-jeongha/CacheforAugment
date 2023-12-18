@@ -30,7 +30,7 @@ from torch._utils import ExceptionWrapper
 from torch.utils.data.datapipes.datapipe import IterDataPipe, MapDataPipe
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, BatchSampler
-from sampler import BundleRandomSampler, BatchWithCacheSampler
+from sampler import BundleRandomSampler, SizedBatchSampler, BatchWithCacheSampler
 
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper, _MapDataPipeSerializationWrapper
 
@@ -167,6 +167,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         #                 multiprocessing_context, generator,
         #                 prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
         #                 pin_memory_device=pin_memory_device)
+
         torch._C._log_api_usage_once("python.data_loader")
 
         if num_workers < 0:
@@ -188,6 +189,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             raise ValueError('persistent_workers option needs num_workers > 0')
 
         self.dataset = dataset
+        self.cache_dataset = dataset.cache_sample
         self.num_workers = num_workers
         self.prefetch_factor = prefetch_factor
         self.pin_memory = pin_memory
@@ -196,6 +198,8 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         self.worker_init_fn = worker_init_fn
         self.multiprocessing_context = multiprocessing_context
         self.multithread = is_multithread
+        self.batch_size = batch_size
+        self.shuffle = shuffle
 
         # Adds forward compatibilities so classic DataLoader can work with DataPipes:
         #   _DataPipeSerializationWrapper container makes it easier to serialize without redefining pickler
@@ -258,32 +262,12 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                 raise ValueError('batch_size=None option disables auto-batching '
                                  'and is mutually exclusive with drop_last')
 
-        if sampler is None:  # give default samplers
-            if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
-                if shuffle:
-                    sampler = SamplerIterDataPipe(dataset, sampler=RandomSampler, 
-                    sampler_kwargs={'generator':generator})
-                else:
-                    # See NOTE [ Custom Samplers and IterableDataset ]
-                    sampler = _InfiniteConstantSampler()
-            else:  # map-style
-                if shuffle:
-                    sampler = RandomSampler(dataset, generator=generator)  # type: ignore[arg-type]
-                else:
-                    sampler = SequentialSampler(dataset)  # type: ignore[arg-type]
-
-        if batch_size is not None and batch_sampler is None:
-            # auto_collation without custom batch_sampler
-            if self.multithread:
-                batch_sampler = BatchWithCacheSampler(sampler, None, batch_size, drop_last)
-            else:
-                batch_sampler = BatchSampler(sampler, batch_size, drop_last)
-
-        self.batch_size = batch_size
         self.drop_last = drop_last
-        self.sampler = sampler
-        self.batch_sampler = batch_sampler
         self.generator = generator
+        self.sampler = self._sampler
+        self.cache_sampler = self._cache_sampler
+        self.batch_sampler = self._batch_sampler
+        self.cache_batch_sampler = self._cache_batch_sampler
 
         if collate_fn is None:
             if self._auto_collation:
@@ -303,13 +287,49 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
         torch.set_vital('Dataloader', 'enabled', 'True')  # type: ignore[attr-defined]
 
+    @property
+    def _cache_sampler(self):
+        print("_cache_sampler", len(self.dataset.cache_sample))
+        if self.shuffle and len(self.dataset.cache_sample) > 0:
+            return RandomSampler(self.dataset.cache_sample, generator=self.generator)
+        else:
+            return SequentialSampler(self.dataset.cache_sample)
+
+    @property
+    def _sampler(self):
+        print("_sampler", len(self.dataset.imgs))
+        if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
+            if self.shuffle:
+                sampler = SamplerIterDataPipe(self.dataset.imgs, sampler=RandomSampler,
+                sampler_kwargs={'generator':self.generator})
+            else:
+                # See NOTE [ Custom Samplers and IterableDataset ]
+                sampler = _InfiniteConstantSampler()
+        else:  # map-style
+            if self.shuffle:
+                sampler = RandomSampler(self.dataset.imgs, generator=self.generator)  # type: ignore[arg-type]
+            else:
+                sampler = SequentialSampler(self.dataset.imgs)  # type: ignore[arg-type]
+        return sampler
+
+    @property
+    def _batch_sampler(self):
+        print("_batch_sampler")
+        batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
+        return SizedBatchSampler(self._sampler, batch_num, True)
+
+    @property
+    def _cache_batch_sampler(self):
+        print("_cache_batch_sampler")
+        batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
+        return SizedBatchSampler(self._cache_sampler, batch_num, False)
+
     def _get_iterator(self) -> '_BaseDataLoaderWithCacheIter':
         if self.num_workers == 0:
             return _SingleProcessDataLoaderWithCacheIter(self)
         else:
             self.check_worker_number_rationality()
             return _MultiProcessingDataLoaderWithCacheIter(self)
-
 
     # We quote '_BaseDataLoaderIter' since it isn't defined yet and the definition can't be moved up
     # since '_BaseDataLoaderIter' references 'DataLoader'.
@@ -327,6 +347,22 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             return self._iterator
         else:
             return self._get_iterator()
+
+    @property
+    def _index_sampler(self):
+        print("_index_sampler")
+        if self._auto_collation:
+            return self._batch_sampler
+        else:
+            return self._sampler
+
+    @property
+    def _cache_index_sampler(self):
+        print("_caache_index_sampler")
+        if self._auto_collation:
+            return self._cache_batch_sampler
+        else:
+            return self._cache_sampler
 
     def __len__(self) -> int:
         if (self._dataset_kind == _DatasetKind.Iterable) or (self._dataset_kind == _MultithreadDatasetKind.Iterable):
@@ -361,17 +397,14 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
     def __init__(self, loader: DataLoaderWithCache) -> None:
         super().__init__(loader)
+        self._cache_dataset = loader.cache_dataset
+        self._cache_index_sampler = loader._cache_index_sampler
+        self._cache_sampler_iter = iter(self._cache_index_sampler)
         self._multithread = loader.multithread
-        #self.is_first = True
-        #self.dataset_copy = loader.dataset
 
-    '''
     def _reset(self, loader, first_iter=False):
-        #if self.is_first:
-        #    self.is_first = False
-        #else:
-        #    loader.dataset.update_reuse_factor_for_remain_evicter()
         self._sampler_iter = iter(self._index_sampler)
+        self._cache_sampler_iter = iter(self._cache_index_sampler)
         self._num_yielded = 0
         self._IterableDataset_len_called = loader._IterableDataset_len_called
         if isinstance(self._dataset, IterDataPipe):
@@ -379,33 +412,6 @@ class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
             shared_rng = torch.Generator()
             shared_rng.manual_seed(self._shared_seed)
             self._dataset = torch.utils.data.graph_settings.apply_random_seed(self._dataset, shared_rng)
-
-    def __next__(self) -> Any:
-        with torch.autograd.profiler.record_function(self._profile_name):
-            if self._sampler_iter is None:
-                # TODO(https://github.com/pytorch/pytorch/issues/76750)
-                self._reset()  # type: ignore[call-arg]
-            data = self._next_data()
-            self._num_yielded += 1
-            if self._dataset_kind == _MultithreadDatasetKind.Iterable and \
-                    self._IterableDataset_len_called is not None and \
-                    self._num_yielded > self._IterableDataset_len_called:
-                warn_msg = ("Length of IterableDataset {} was reported to be {} (when accessing len(dataloader)), but {} "
-                            "samples have been fetched. ").format(self._dataset, self._IterableDataset_len_called,
-                                                                  self._num_yielded)
-                if self._num_workers > 0:
-                    warn_msg += ("For multiprocessing data-loading, this could be caused by not properly configuring the "
-                                 "IterableDataset replica at each worker. Please see "
-                                 "https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset for examples.")
-                warnings.warn(warn_msg)
-            return data
-
-    def __iter__(self) -> '_BaseDataLoaderWithCacheIter':
-        return self
-
-    def _next_index(self):
-            return next(self._sampler_iter)  # may raise StopIteration
-    '''
 
 
 class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _SingleProcessDataLoaderIter):
@@ -417,15 +423,31 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
         self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
             self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._multithread)
 
+    def _next_data(self):
+        index = self._next_index()  # may raise StopIteration
+        data = self._dataset_fetcher.fetch(index)  # may raise StopIteration
 
-class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderIter): #_BaseDataLoaderWithCacheIter, _MultiProcessingDataLoaderIter
+        cache_data = []
+        try:
+            cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
+        except ZeroDivisionError:   # At first epoch, len(cache_sampler) is 0
+            pass
+        except StopIteration:
+            pass
+
+        if len(cache_data) > 0:
+            cache_data = _utils.collate.default_collate(cache_data)
+            data = [torch.concat((i, j)) for (i, j) in zip(data, cache_data)]
+
+        if self._pin_memory:
+            data = _utils.pin_memory.pin_memory(data, self._pin_memory_device)
+        return data
+
+class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    # _MultiProcessingDataLoaderIter
     r"""Iterates once over the DataLoader's dataset, as specified by the sampler"""
 
     def __init__(self, loader):
         super().__init__(loader)
-        #super(_MultiProcessingDataLoaderWithCacheIter, self).__init__(loader)
-        self._multithread = loader.multithread
-
         self._prefetch_factor = loader.prefetch_factor
 
         assert self._num_workers > 0
@@ -518,8 +540,9 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderIter): #_BaseDataLo
         self._worker_pids_set = True
         self._reset(loader, first_iter=True)
 
-    def _reset(self, loader, first_iter=False):     # TODO: initialize cache?
+    def _reset(self, loader, first_iter=False):
         super()._reset(loader, first_iter)
+        # TODO : reset `cache_dataset` -> done. see `_reset()` in `_BaseDataLoaderWithCacheIter`
         self._send_idx = 0  # idx of the next task to be sent to workers
         self._rcvd_idx = 0  # idx of the next task to be returned in __next__
         # information about data not yet yielded, i.e., tasks w/ indices in range [rcvd_idx, send_idx).
@@ -565,7 +588,23 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderIter): #_BaseDataLo
         #   (bool: whether successfully get data, any: data if successful else None)
         try:
             data = self._data_queue.get(timeout=timeout)
+            # TODO: append `cache_data` -> done
+            cache_data = []
+            try:
+                cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
+            except ZeroDivisionError:  # At first epoch, len(cache_sampler) is 0
+                pass
+            except StopIteration:
+                pass
+            if len(cache_data) > 0:
+                cache_data = _utils.collate.default_collate(cache_data)
+
+                batch_index, batch_samples = data
+                batch_samples = [torch.concat((i, j)) for (i, j) in zip(batch_samples, cache_data)]
+                data = (batch_index, batch_samples)
+
             return (True, data)
+
         except Exception as e:
             # At timeout and error, we manually check whether any worker has
             # failed. Note that this is the only mechanism for Windows to detect
