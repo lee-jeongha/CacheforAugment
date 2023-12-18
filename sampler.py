@@ -4,112 +4,72 @@ from torch import Tensor
 from typing import Iterator, Iterable, Optional, Sequence, List, TypeVar, Generic, Sized, Union
 from torch.utils.data import Sampler
 
-class BatchWithCacheSampler(Sampler[List[int]]):
+class SizedBatchSampler(Sampler[List[int]]):
     r"""Wraps another sampler to yield a mini-batch of indices.
 
     Args:
         sampler (Sampler or Iterable): Base sampler. Can be any iterable object
-        batch_size (int): Size of mini-batch.
-        cached_index (List[int] or Iterable[int]): Cached index.
-        drop_last (bool): If ``True``, the sampler will drop the last batch if
-            its size would be less than ``batch_size``
+        batch_num (int): Number of mini-batch.
+
+    Example:
+        >>> list(SizedBatchSampler(SequentialSampler(range(10)), batch_num=3, upper_first=False))
+        [[0, 1, 2], [3, 4, 5], [6, 7, 8, 9]]
+        >>> list(SizedBatchSampler(SequentialSampler(range(10)), batch_num=3, upper_first=True))
+        [[0, 1, 2, 3], [4, 5, 6], [7, 8, 9]]
     """
 
-    def __init__(self, sampler: Union[Sampler[int], Iterable[int]], cached_index: Union[List[int], Iterable[int]], batch_size: int, drop_last: bool) -> None:
-        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or \
-                batch_size <= 0:
-            raise ValueError("batch_size should be a positive integer value, "
-                             "but got batch_size={}".format(batch_size))
-        if not isinstance(drop_last, bool):
-            raise ValueError("drop_last should be a boolean value, but got "
-                             "drop_last={}".format(drop_last))
+    def __init__(self, sampler: Union[Sampler[int], Iterable[int]], batch_num: int, upper_first: bool = True) -> None:
+        # Since collections.abc.Iterable does not check for `__getitem__`, which
+        # is one way for an object to be an iterable, we don't do an `isinstance`
+        # check here.
+        if batch_num is None:
+            raise ValueError(f"batch_num should be a positive integer value, but got batch_num={batch_num}")
+
         self.sampler = sampler
-        self.is_first_iter = True
-        if cached_index is not None:
-            self.len_cached_index = len(cached_index)
-            self.cached_index = cached_index[torch.randperm(self.len_cached_index, generator=torch.Generator())]
+        self.lower_batch_size = len(self.sampler) // batch_num
+        self.upper_batch_size = self.lower_batch_size + 1
+        self.batch_num = batch_num
+        self.upper_batch_num = len(self.sampler) % batch_num
+        self.lower_batch_num = batch_num - self.upper_batch_num
+        self.upper_first = upper_first
+
+        if (not self.upper_first) or (self.upper_batch_num == 0):
+            self.batch_nums = [self.lower_batch_num, self.upper_batch_num]
+            self.batch_sizes = [self.lower_batch_size, self.upper_batch_size]
         else:
-            self.len_cached_index = 0
-            self.cached_index = None
-        self.batch_size = batch_size
-        self.drop_last = drop_last
+            self.batch_nums = [self.upper_batch_num, self.lower_batch_num]
+            self.batch_sizes = [self.upper_batch_size, self.lower_batch_size]
+
+        self.batch_counter = 0
 
     def __iter__(self) -> Iterator[List[int]]:
-        cached_num_per_batch = self.len_cached_index // self.__len__()
-        if self.drop_last:
-            sampler_iter = iter(self.sampler)
-            mv_iter = iter(self.cached_index)
-            if self.cached_index is not None:
-                while True:
-                    try:
-                        while len(batch) == (self.batch_size - cached_num_per_batch):
-                            len_curr_batch = len(curr_batch) if curr_batch is not None else 0
-                            curr_batch = [next(sampler_iter) for _ in range(self.batch_size - len_curr_batch - cached_num_per_batch)]
-                            curr_batch = [item for item in batch if item not in self.cached_index]
-                            batch += curr_batch
-                        batch += [next(mv_iter) for _ in range(cached_num_per_batch)]
-                        yield batch
-                    except StopIteration:
-                        break
-            else:
-                while True:
-                    try:
-                        batch = [next(sampler_iter) for _ in range(self.batch_size)]
-                        yield batch
-                    except StopIteration:
-                        break
-        
-        else:
-            if self.cached_index is not None:
-                batch = [self.cached_index[:cached_num_per_batch]] + [0] * (self.batch_size - cached_num_per_batch)
-                base_in_mv = cached_num_per_batch
-                idx_in_batch = cached_num_per_batch
+        # Implemented based on the benchmarking in https://github.com/pytorch/pytorch/pull/76951
+        batch = [0] * self._batch_size
+        idx_in_batch = 0
+        for idx in self.sampler:
+            if self.batch_counter > self.batch_num:
+                raise StopIteration
 
-                for idx in self.sampler:
-                    if idx in self.cached_index:
-                        continue                
-                    batch[idx_in_batch] = idx
-                    idx_in_batch += 1
-                    if idx_in_batch == self.batch_size:
-                        yield batch
-                        base_in_mv += cached_num_per_batch
-                        batch = [self.cached_index[base_in_mv:base_in_mv+cached_num_per_batch]] + [0] * (self.batch_size - cached_num_per_batch)
-                        idx_in_batch = cached_num_per_batch
-
-                if idx_in_batch > cached_num_per_batch:    # end of sampler
-                    if base_in_mv < self.len_cached_index:   # but still has memoryview_index left
-                        batch = batch[:idx_in_batch] + self.cached_index[base_in_mv:]
-                        idx_in_batch += (self.len_cached_index - base_in_mv)
-                        if idx_in_batch > self.batch_size:
-                            for _ in range(idx_in_batch // self.batch_size):
-                                yield batch[:self.batch_size]
-                                batch = batch[self.batch_size:]
-                            yield batch
-                    else:
-                        yield batch[:idx_in_batch]
-            
-            else:
-                batch = [0] * self.batch_size
+            batch[idx_in_batch] = idx
+            idx_in_batch += 1
+            if idx_in_batch == self._batch_size:
+                yield batch
+                self.batch_counter += 1
                 idx_in_batch = 0
-                for idx in self.sampler:
-                    batch[idx_in_batch] = idx
-                    idx_in_batch += 1
-                    if idx_in_batch == self.batch_size:
-                        yield batch
-                        idx_in_batch = 0
-                        batch = [0] * self.batch_size
-                if idx_in_batch > 0:
-                    yield batch[:idx_in_batch]
-        
-    def __len__(self) -> int:
-        # Can only be called if self.sampler has __len__ implemented
-        # We cannot enforce this condition, so we turn off typechecking for the
-        # implementation below.
-        # Somewhat related: see NOTE [ Lack of Default `__len__` in Python Abstract Base Classes ]
-        if self.drop_last:
-            return len(self.sampler) // self.batch_size  # type: ignore[arg-type]
+                batch = [0] * self._batch_size
+        if idx_in_batch > 0:
+            yield batch[:idx_in_batch]
+            self.batch_counter += 1
+
+    @property
+    def _batch_size(self):
+        if self.batch_counter >= self.batch_nums[0]:
+            return self.batch_sizes[1]
         else:
-            return (len(self.sampler) + self.batch_size - 1) // self.batch_size  # type: ignore[arg-type]
+            return self.batch_sizes[0]
+
+    def __len__(self) -> int:
+        return self.batch_num
 
 
 class BundleRandomSampler(Sampler[int]):
