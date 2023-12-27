@@ -30,7 +30,7 @@ from torch._utils import ExceptionWrapper
 from torch.utils.data.datapipes.datapipe import IterDataPipe, MapDataPipe
 from torch.utils.data.dataset import Dataset, IterableDataset
 from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, BatchSampler
-from sampler import BundleRandomSampler, SizedBatchSampler, BatchWithCacheSampler
+from sampler import BundleRandomSampler, SizedBatchSampler
 
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper, _MapDataPipeSerializationWrapper
 
@@ -289,7 +289,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _cache_sampler(self):
-        print("_cache_sampler", len(self.dataset.cache_sample))
         if self.shuffle and len(self.dataset.cache_sample) > 0:
             return RandomSampler(self.dataset.cache_sample, generator=self.generator)
         else:
@@ -297,7 +296,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _sampler(self):
-        print("_sampler", len(self.dataset.imgs))
         if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
             if self.shuffle:
                 sampler = SamplerIterDataPipe(self.dataset.imgs, sampler=RandomSampler,
@@ -314,13 +312,11 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _batch_sampler(self):
-        print("_batch_sampler")
         batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
         return SizedBatchSampler(self._sampler, batch_num, True)
 
     @property
     def _cache_batch_sampler(self):
-        print("_cache_batch_sampler")
         batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
         return SizedBatchSampler(self._cache_sampler, batch_num, False)
 
@@ -350,7 +346,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _index_sampler(self):
-        print("_index_sampler")
         if self._auto_collation:
             return self._batch_sampler
         else:
@@ -358,7 +353,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _cache_index_sampler(self):
-        print("_caache_index_sampler")
         if self._auto_collation:
             return self._cache_batch_sampler
         else:
