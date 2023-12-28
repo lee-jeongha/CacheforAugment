@@ -44,12 +44,14 @@ class SizedBatchSampler(Sampler[List[int]]):
 
     def __iter__(self) -> Iterator[List[int]]:
         # Implemented based on the benchmarking in https://github.com/pytorch/pytorch/pull/76951
+        if self._batch_size <= 0:
+            return
+
         batch = [0] * self._batch_size
         idx_in_batch = 0
         for idx in self.sampler:
             if self.batch_counter > self.batch_num:
                 raise StopIteration
-
             batch[idx_in_batch] = idx
             idx_in_batch += 1
             if idx_in_batch == self._batch_size:
