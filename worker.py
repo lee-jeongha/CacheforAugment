@@ -14,7 +14,7 @@ from torch.utils.data._utils.worker import _generate_state, _ResumeIteration, _I
 
 def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue, done_event,
                                  auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
-                                 num_workers, persistent_workers, shared_seed, is_multithread):
+                                 num_workers, persistent_workers, shared_seed, num_threads):
     # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on the
     # logic of this function.
 
@@ -57,7 +57,7 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
             if init_fn is not None:
                 init_fn(worker_id)
 
-            fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, is_multithread)
+            fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
         except Exception:
             init_exception = ExceptionWrapper(
                 where="in DataLoader worker process {}".format(worker_id))
@@ -95,7 +95,7 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
 
                 # Recreate the fetcher for worker-reuse policy
                 fetcher = _MultithreadDatasetKind.create_fetcher(
-                    dataset_kind, dataset, auto_collation, collate_fn, drop_last, False, is_multithread)
+                    dataset_kind, dataset, auto_collation, collate_fn, drop_last, False, num_threads)
                 continue
             elif r is None:
                 # Received the final signal

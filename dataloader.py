@@ -47,11 +47,11 @@ class _MultithreadDatasetKind():    # torch.utils.data._DatasetKind
     Iterable = 1
 
     @staticmethod
-    def create_fetcher(kind, dataset, auto_collation, collate_fn, drop_last, multithread: Optional[bool] = False):
+    def create_fetcher(kind, dataset, auto_collation, collate_fn, drop_last, num_threads: Optional[int] = None):
         if kind == _MultithreadDatasetKind.Map:
-            return _MultithreadMapDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, multithread)
+            return _MultithreadMapDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, num_threads)
         else:
-            return _MultithreadIterableDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, multithread)
+            return _MultithreadIterableDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, num_threads)
 
 class BundleDataLoader(torch.utils.data.DataLoader):
     r"""
@@ -161,7 +161,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                  *, prefetch_factor: Optional[int] = None,
                  persistent_workers: bool = False,
                  pin_memory_device: str = "",
-                 is_multithread: bool = True):
+                 num_threads: Optional[int] = None):
         #super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers,
         #                 collate_fn, pin_memory, drop_last, timeout, worker_init_fn,
         #                 multiprocessing_context, generator,
@@ -197,7 +197,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         self.timeout = timeout
         self.worker_init_fn = worker_init_fn
         self.multiprocessing_context = multiprocessing_context
-        self.multithread = is_multithread
+        self.num_threads = num_threads
         self.batch_size = batch_size
         self.shuffle = shuffle
 
@@ -213,7 +213,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         # samplers first, so that they don't learn that this combo doesn't work
         # after spending time fixing the custom sampler errors.
         if isinstance(dataset, IterableDataset):
-            if self.multithread:
+            if self.num_threads:
                 self._dataset_kind = _MultithreadDatasetKind.Iterable
             else:
                 self._dataset_kind = _DatasetKind.Iterable
@@ -239,7 +239,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                     "batch_sampler option, but got batch_sampler={}".format(batch_sampler))
         else:
             shuffle = bool(shuffle)
-            if self.multithread:
+            if self.num_threads:
                 self._dataset_kind = _MultithreadDatasetKind.Map
             else:
                 self._dataset_kind = _DatasetKind.Map
@@ -394,7 +394,7 @@ class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
         self._cache_dataset = loader.cache_dataset
         self._cache_index_sampler = loader._cache_index_sampler
         self._cache_sampler_iter = iter(self._cache_index_sampler)
-        self._multithread = loader.multithread
+        self._num_threads = loader.num_threads
 
     def _reset(self, loader, first_iter=False):
         self._sampler_iter = iter(self._index_sampler)
@@ -415,7 +415,7 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
         super(_SingleProcessDataLoaderWithCacheIter, self).__init__(loader)
 
         self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
-            self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._multithread)
+            self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
 
     def _next_data(self):
         index = self._next_index()  # may raise StopIteration
@@ -480,7 +480,7 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
                       self._worker_result_queue, self._workers_done_event,
                       self._auto_collation, self._collate_fn, self._drop_last,
                       self._base_seed, self._worker_init_fn, i, self._num_workers,
-                      self._persistent_workers, self._shared_seed, self._multithread))
+                      self._persistent_workers, self._shared_seed, self._num_threads))
             w.daemon = True
             # NB: Process.start() actually take some time as it needs to
             #     start a process and pass the arguments over via a pipe.
