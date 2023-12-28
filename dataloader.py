@@ -582,21 +582,6 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
         #   (bool: whether successfully get data, any: data if successful else None)
         try:
             data = self._data_queue.get(timeout=timeout)
-            # TODO: append `cache_data` -> done
-            cache_data = []
-            try:
-                cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
-            except ZeroDivisionError:  # At first epoch, len(cache_sampler) is 0
-                pass
-            except StopIteration:
-                pass
-            if len(cache_data) > 0:
-                cache_data = _utils.collate.default_collate(cache_data)
-
-                batch_index, batch_samples = data
-                batch_samples = [torch.concat((i, j)) for (i, j) in zip(batch_samples, cache_data)]
-                data = (batch_index, batch_samples)
-
             return (True, data)
 
         except Exception as e:
@@ -740,6 +725,17 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
         self._try_put_index()
         if isinstance(data, ExceptionWrapper):
             data.reraise()
+        # append `cache_data`
+        cache_data = []
+        try:
+            cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
+        except ZeroDivisionError:  # At first epoch, len(cache_sampler) is 0
+            pass
+        except StopIteration:
+            pass
+        if len(cache_data) > 0:
+            cache_data = _utils.collate.default_collate(cache_data)
+            data = [torch.concat((i, j)) for (i, j) in zip(data, cache_data)]
         return data
 
     def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
