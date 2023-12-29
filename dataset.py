@@ -1,8 +1,8 @@
 import torch, torchvision
 import numpy as np
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple
 from PIL import Image
-import heapq, array, gc, time, copy
+import heapq, gc, time, copy
 import multiprocessing as mp
 
 IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".pgm", ".tif", ".tiff", ".webp")
@@ -109,10 +109,10 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
         """
         Args:
-            idx (int): Index
-            sample (numpy.array):
-            target:
-            loss (float):
+            idx (Tensor(dtype=int)): Index
+            sample (Tensor):
+            target (Tensor):
+            loss (Tensor(dtype=float)): Loss tensor of samples.
         """
 
         losses_abs = torch.mul(torch.abs(losses), -1)   # -abs(loss)
@@ -203,9 +203,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
     def update_reuse_factor_for_remain_evicter(self):
         for idx in self.idx_to_be_dismissed:
-            cached_data_element = self.cache_sample[idx]  # (sample, target, reuse_factor, abs(loss))
-            cached_data_element[2].value += 1
-            self.cache_sample[idx] = cached_data_element
+            self.cache_sample[idx][2].value += 1    # self.cache_sample[idx] = (sample, target, reuse_factor, abs(loss))
         del self.idx_to_be_dismissed
 
     def update_imgs_path_list(self):
