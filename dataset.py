@@ -114,6 +114,10 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             target (Tensor):
             loss (Tensor(dtype=float)): Loss tensor of samples.
         """
+        possibly_batched_index = possibly_batched_index.to('cpu')
+        samples = samples.to('cpu')
+        targets = targets.to('cpu')
+        losses = losses.to('cpu')
 
         losses_abs = torch.mul(torch.abs(losses), -1)   # -abs(loss)
         loss_condi = torch.where(losses_abs < self.max_loss_candidates, 0., 1.)

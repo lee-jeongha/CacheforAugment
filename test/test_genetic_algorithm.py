@@ -83,10 +83,10 @@ def genetic_algorithm(objective, trainset, valset, population, n_iter, n_pop, p_
 
         # check for new best solution
         for i in range(n_pop):
-            print(">Gen{}, f({}) = {:.3f}".format(gen,  pop[i], scores[i]))
+            print(">Gen{}, f({}) = {:.3f}".format(gen, pop[i], scores[i]))
 
             # update hist
-            hist['_'.join(pop[i])] = scores[i]
+            hist['_'.join([str(c) for c in pop[i]])] = scores[i]
             if scores[i] > best_eval:
                 best, best_eval = pop[i], scores[i]
                 print(">Gen{}, new best f({}) = {:.3f}".format(gen,  pop[i], scores[i]))
@@ -140,8 +140,6 @@ if __name__ == "__main__":
 
     # define the total iterations
     n_iter = 5
-    # bits
-    len_elements = 20
     # define the population size
     n_pop = 50
     # crossover point
@@ -150,14 +148,9 @@ if __name__ == "__main__":
     r_mut = 1.0 / float(len(elements))
     drop_cache = 'echo "' + args.passwd + '" | sudo -S sh -c "echo 3 > /proc/sys/vm/drop_caches"'
 
-    n_elements = n_pop // 2
-    elements = [(e * n_elements)[:n_pop] for e in elements]
-    for e in elements:
-        random.shuffle(e)
-
     population = []
     for i in range(n_pop):
-        population.append([e[i] for e in elements])
+        population.append([random.choice(e) for e in elements])
     print(population)
 
     # perform the genetic algorithm search

@@ -22,12 +22,11 @@ def train_one_batch(data, model, criterion, optimizer, device='cpu'):
     iter_size = labels.size(0)
     iter_correct = (predicted == labels).sum().item()
     iter_loss = loss.mean().item()
-    return iter_size, iter_correct, iter_loss, loss.tolist(), time.mean().item()
+    return iter_size, iter_correct, iter_loss, loss, time.mean().item()
 #-------------------------------------------#
 def validate_model(model, test_loader, criterion, device):
     model.eval()
     total, correct, test_loss = 0, 0, 0
-    j = 0
     with torch.no_grad():
         for data in test_loader:
             _, inputs, labels, _ = data
@@ -39,10 +38,9 @@ def validate_model(model, test_loader, criterion, device):
 
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-            test_loss += criterion(outputs, labels).mean().item()
-            j += 1
+            test_loss += criterion(outputs, labels).sum().item()
     
-    return test_loss / j, correct / total
+    return test_loss / total, correct / total
 #-------------------------------------------#
 default_transforms = torchvision.transforms.Compose(
                         [torchvision.transforms.Resize([224,224]), torchvision.transforms.ToTensor()])
@@ -77,14 +75,14 @@ def _train_model(model, dataset, train_loader, test_loader,
         for data in train_loader:
             model.train()
 
-            iter_size, iter_correct, iter_loss, loss_list, iter_time = train_one_batch(data, model, criterion, optimizer, device)
+            iter_size, iter_correct, iter_loss, losses, iter_time = train_one_batch(data, model, criterion, optimizer, device)
             idx, sample, target, _ = data
 
             try:
                 if criteria == 'random':
                     dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
                 elif criteria == 'loss_sample':
-                    dataset.cache_batch(idx, sample, target, loss_list)
+                    dataset.cache_batch(idx, sample, target, losses)
             except AttributeError:
                 pass
 

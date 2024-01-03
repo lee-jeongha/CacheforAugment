@@ -117,9 +117,9 @@ if __name__ == '__main__':
     # dataloader
     if (loader_type == 'proposed'):
         train_loader    = DataLoaderWithCache(train_image_folder, batch_size=batch_size, shuffle=True,
-                                            num_workers=2, num_threads=8)
+                                            num_workers=4, num_threads=8)
         test_loader     = DataLoaderWithCache(test_image_folder, batch_size=batch_size, shuffle=True,
-                                            num_workers=2, num_threads=8)
+                                            num_workers=4, num_threads=8)
     elif (loader_type == 'default'):
         train_loader    = torch.utils.data.DataLoader(train_image_folder, batch_size=batch_size, shuffle=True,
                                                     num_workers=16)
@@ -127,10 +127,10 @@ if __name__ == '__main__':
                                                     num_workers=16)
 
     # get deep learning model
-    pretrained = torchvision.models.resnet18(weights=None)
-    #pretrained = torchvision.models.alexnet(weights=None)
-    #pretrained = torchvision.models.mobilenet_v2(weights=None)
-    model = make_model(model=pretrained, num_classes=10)
+    preset_model = torchvision.models.resnet18(weights=None)
+    #preset_model = torchvision.models.alexnet(weights=None)
+    #preset_model = torchvision.models.mobilenet_v2(weights=None)
+    model = make_model(model=preset_model, num_classes=10)
     model_name = 'ResNet18'
 
     # make output directory
@@ -144,7 +144,7 @@ if __name__ == '__main__':
     # train
     loss, acc, time, val_loss, val_acc, loading = utils._train_model(model, dataset=train_image_folder,
                                                                      train_loader=train_loader, test_loader=test_loader,
-                                                                     batch_size=batch_size, epochs=100, device=device,
+                                                                     epochs=100, device=device,
                                                                      criterion=criterion, optimizer=optimizer,
                                                                      model_name=model_name, output_dir=args.output,
                                                                      min_reuse_factor=args.min_reuse_factor,
@@ -159,3 +159,6 @@ if __name__ == '__main__':
     loss = df['train_loss'];    acc = df['train_accuracy'];    time = df['elapsed_time']
     val_loss = df['validation_loss'];    val_acc = df['validation_accuracy']
     plot_result(loss=loss, acc=acc, time=time, val_loss=val_loss, val_acc=val_acc, model_name=model_name, output_dir=args.output)
+
+    # TODO: return objective function with `print()`
+    print((0.4 * np.mean(val_acc)) - (0.6 * np.mean(loading)))
