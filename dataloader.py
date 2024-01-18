@@ -259,6 +259,23 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
         self.file_idx = dataset.imgs.keys()
         self.cache_idx = dataset.cache_sample.keys()
+
+        # initialize _cache_sampler
+        if self.shuffle and len(self.cache_idx) > 0:
+            self._cache_sampler = RandomSampler(self.cache_idx, generator=generator)
+        else:
+            self._cache_sampler = SequentialSampler(self.cache_idx)
+
+        # initialize _file_sampler
+        if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
+            # See NOTE [ Custom Samplers and IterableDataset ]
+            self._file_sampler = _InfiniteConstantSampler()
+        else:  # map-style
+            if self.shuffle:
+                self._file_sampler = RandomSampler(self.file_idx, generator=generator)  # type: ignore[arg-type]
+            else:
+                self._file_sampler = SequentialSampler(self.file_idx)  # type: ignore[arg-type]
+
         self.drop_last = drop_last
         self.generator = generator
         self.file_sampler = self._file_sampler
@@ -283,25 +300,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         self.check_worker_number_rationality()
 
         torch.set_vital('Dataloader', 'enabled', 'True')  # type: ignore[attr-defined]
-
-    @property
-    def _cache_sampler(self):
-        if self.shuffle and len(self.cache_idx) > 0:
-            return RandomSampler(self.cache_idx, generator=self.generator)
-        else:
-            return SequentialSampler(self.cache_idx)
-
-    @property
-    def _file_sampler(self):
-        if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
-            # See NOTE [ Custom Samplers and IterableDataset ]
-            sampler = _InfiniteConstantSampler()
-        else:  # map-style
-            if self.shuffle:
-                sampler = RandomSampler(self.file_idx, generator=self.generator)  # type: ignore[arg-type]
-            else:
-                sampler = SequentialSampler(self.file_idx)  # type: ignore[arg-type]
-        return sampler
 
     @property
     def _file_batch_sampler(self):
