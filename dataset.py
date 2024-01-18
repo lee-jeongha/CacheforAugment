@@ -119,8 +119,8 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         targets = targets.to('cpu')
         losses = losses.to('cpu')
 
-        losses_abs = torch.mul(torch.abs(losses), -1)   # -abs(loss)
-        loss_condi = torch.where(losses_abs < self.max_loss_candidates, 0., 1.)
+        losses_neg_abs = torch.mul(torch.abs(losses), -1)   # -abs(loss)
+        loss_condi = torch.where(losses_neg_abs < self.max_loss_candidates, 0., 1.)
 
         idx_copy = copy.deepcopy(possibly_batched_index)
         idx_condi = idx_copy.apply_(lambda x: x not in self.cache_sample).bool()
@@ -150,7 +150,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                     _ = self.release_from_idx(popped_idx, has_to_delete_idx=True)
                 except IndexError:
                     '''
-                    If the current epoch is less than min_reuse_factor, the `self.evict_candiates_heap` might be empty.
+                    If the current epoch is less than min_reuse_factor, the `self.evict_candidates_heap` might be empty.
                     '''
                     return
 

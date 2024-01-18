@@ -104,8 +104,8 @@ class BundleDataLoader(torch.utils.data.DataLoader):
         if sampler is None:  # give default samplers
             if self._dataset_kind == _DatasetKind.Iterable:
                 if shuffle and self.bundle_size:
-                    sampler = SamplerIterDataPipe(dataset, sampler=BundleRandomSampler, 
-                    sampler_kwargs={'bundle_size':self.bundle_size, 'generator':generator, 'alternating_order':self.alternating_order})
+                    sampler = SamplerIterDataPipe(dataset, sampler=BundleRandomSampler,
+                                                  sampler_kwargs={'bundle_size':self.bundle_size, 'generator':generator, 'alternating_order':self.alternating_order})
                 else:
                     # See NOTE [ Custom Samplers and IterableDataset ]
                     sampler = _InfiniteConstantSampler()
@@ -162,11 +162,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                  persistent_workers: bool = False,
                  pin_memory_device: str = "",
                  num_threads: Optional[int] = None):
-        #super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers,
-        #                 collate_fn, pin_memory, drop_last, timeout, worker_init_fn,
-        #                 multiprocessing_context, generator,
-        #                 prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
-        #                 pin_memory_device=pin_memory_device)
 
         torch._C._log_api_usage_once("python.data_loader")
 
@@ -262,11 +257,13 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                 raise ValueError('batch_size=None option disables auto-batching '
                                  'and is mutually exclusive with drop_last')
 
+        self.file_idx = dataset.imgs.keys()
+        self.cache_idx = dataset.cache_sample.keys()
         self.drop_last = drop_last
         self.generator = generator
-        self.sampler = self._sampler
+        self.file_sampler = self._file_sampler
         self.cache_sampler = self._cache_sampler
-        self.batch_sampler = self._batch_sampler
+        self.batch_sampler = self._file_batch_sampler
         self.cache_batch_sampler = self._cache_batch_sampler
 
         if collate_fn is None:
@@ -289,31 +286,27 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _cache_sampler(self):
-        if self.shuffle and len(self.dataset.cache_sample) > 0:
-            return RandomSampler(self.dataset.cache_sample, generator=self.generator)
+        if self.shuffle and len(self.cache_idx) > 0:
+            return RandomSampler(self.cache_idx, generator=self.generator)
         else:
-            return SequentialSampler(self.dataset.cache_sample)
+            return SequentialSampler(self.cache_idx)
 
     @property
-    def _sampler(self):
+    def _file_sampler(self):
         if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
-            if self.shuffle:
-                sampler = SamplerIterDataPipe(self.dataset.imgs, sampler=RandomSampler,
-                sampler_kwargs={'generator':self.generator})
-            else:
-                # See NOTE [ Custom Samplers and IterableDataset ]
-                sampler = _InfiniteConstantSampler()
+            # See NOTE [ Custom Samplers and IterableDataset ]
+            sampler = _InfiniteConstantSampler()
         else:  # map-style
             if self.shuffle:
-                sampler = RandomSampler(self.dataset.imgs, generator=self.generator)  # type: ignore[arg-type]
+                sampler = RandomSampler(self.file_idx, generator=self.generator)  # type: ignore[arg-type]
             else:
-                sampler = SequentialSampler(self.dataset.imgs)  # type: ignore[arg-type]
+                sampler = SequentialSampler(self.file_idx)  # type: ignore[arg-type]
         return sampler
 
     @property
-    def _batch_sampler(self):
+    def _file_batch_sampler(self):
         batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
-        return SizedBatchSampler(self._sampler, batch_num, True)
+        return SizedBatchSampler(self._file_sampler, batch_num, True)
 
     @property
     def _cache_batch_sampler(self):
@@ -344,12 +337,16 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         else:
             return self._get_iterator()
 
+        # reset index
+        self.file_idx = copy.deepcopy(set(dataset.imgs.keys()))
+        self.cache_idx = copy.deepcopy(set(dataset.cache_sample.keys()))
+
     @property
-    def _index_sampler(self):
+    def _file_index_sampler(self):
         if self._auto_collation:
-            return self._batch_sampler
+            return self._file_batch_sampler
         else:
-            return self._sampler
+            return self._file_sampler
 
     @property
     def _cache_index_sampler(self):
@@ -385,19 +382,21 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                     length = ceil(length / self.batch_size)
             return length
         else:
-            return len(self._index_sampler)
+            return len(self._file_index_sampler)
 
 
 class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
     def __init__(self, loader: DataLoaderWithCache) -> None:
         super().__init__(loader)
         self._cache_dataset = loader.cache_dataset
+        self._file_index_sampler = loader._file_index_sampler
         self._cache_index_sampler = loader._cache_index_sampler
+        self._sampler_iter = iter(self._file_index_sampler)
         self._cache_sampler_iter = iter(self._cache_index_sampler)
         self._num_threads = loader.num_threads
 
     def _reset(self, loader, first_iter=False):
-        self._sampler_iter = iter(self._index_sampler)
+        self._sampler_iter = iter(self._file_index_sampler)
         self._cache_sampler_iter = iter(self._cache_index_sampler)
         self._num_yielded = 0
         self._IterableDataset_len_called = loader._IterableDataset_len_called
