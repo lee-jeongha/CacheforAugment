@@ -51,9 +51,9 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             target_transform=target_transform,
             is_valid_file=is_valid_file,
         )
-        #self.imgs = self.samples
+        self.imgs = self.samples
         self.samples_dict = { idx : sample for idx, sample in enumerate(self.samples) }
-        self.imgs = copy.deepcopy(self.samples_dict)
+        #self.imgs = copy.deepcopy(self.samples_dict)
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         """
@@ -66,13 +66,9 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         start = time.time()
 
-        if index in self.imgs:
-            path, target = self.imgs[index]
-        else:
-            print("errors on __getitem__ from file_dataset")
-            path, target = self.samples_dict[index]
-
+        path, target = self.imgs[index]
         sample = self.loader(path)
+
         if self.transform is not None:
             sample = self.transform(sample)
 
@@ -84,19 +80,26 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         return index, sample, target, (end-start)
 
     def update_imgs_path_list(self, rm_indices):
-        self.imgs = copy.deepcopy(self.samples_dict)
+        samples_dict = copy.deepcopy(self.samples_dict)
         for index in sorted(rm_indices, reverse=True):
-            del self.imgs[index]
+            del samples_dict[index]
+
+        self.imgs = list(samples_dict.values())
+        del samples_dict
 
 # CachedDataset
 class CachedDataset(torchvision.datasets.DatasetFolder):
     def __init__(
             self,
             cache_length: int,
+            evict_ratio: float = 0.1,
+            min_reuse_factor: int = 1,
             extra_transform: Optional[Callable] = None,
             extra_target_transform: Optional[Callable] = None,
     ):
-        self.cache_len = cache_length
+        self.cache_length = cache_length
+        self.evict_length = int(cache_length * evict_ratio)
+        self.min_reuse_factor = min_reuse_factor
         self.transform = extra_transform
         self.target_transform = extra_target_transform
 
@@ -137,8 +140,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
     def _cache(self, idx, sample, target, reuse_factor=0, loss=0):
         #self.samples[idx] = [ memoryview(sample.numpy()), memoryview(array.array('I', [target])), reuse_factor, abs(loss) ]
         self.samples[idx] = [ sample.to(torch.float16).numpy(), np.int64(target), mp.Value('i',reuse_factor), abs(loss) ]
-        #self.samples[idx] = [ sample.numpy(), np.int64(target), Value('i', reuse_factor), Value('d', abs(loss)) ]
-        #self.samples[idx] = shared_memory.ShareableList( [sample.numpy(), np.int64(target), reuse_factor, abs(loss)] )
+        #self.samples[idx] = [ sample.numpy(), np.int64(target), Value('i', reuse_factor), Value('d', abs(loss) ]
+        #self.samples[idx] = shared_memory.ShareableList( [sample.numpy(), np.int64(target), reuse_factor, abs(loss) )
 
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
         """
@@ -170,7 +173,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         for (index, sample, target, loss) in zip(caching_idx, caching_samples, caching_targets, caching_losses):
             idx = index.item()
 
-            if len(self.samples) < self.cache_len:
+            if len(self.samples) < self.cache_length:
                 '''
                 `self.samples` has not been decided on the first epoch
                 All data structures related to evict will be used in the same size as `self.samples`
@@ -211,7 +214,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         return rf
 
-    def make_evict_candidates(self, min_reuse_factor, evict_ratio):
+    def make_evict_candidates(self):
         '''
         0. `update_reuse_factor()` for the remaining ones in `self.idx_to_be_dismissed`
         1. Making heap by scanning all the elements in `self.samples`: that `reuse_factor` exceeds min value
@@ -225,16 +228,14 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         scan_evict_indices_heap = []    # [ (reuse_factor, abs(loss), index) ]
         for k, v in self.samples.items():
-            if (v[2].value >= min_reuse_factor):
+            if (v[2].value >= self.min_reuse_factor):
                 heapq.heappush(scan_evict_indices_heap, (v[2].value, v[3], k))
-        evict_candidates_heap = heapq.nlargest(int(self.cache_len * evict_ratio), scan_evict_indices_heap)
+        evict_candidates_heap = heapq.nlargest(self.evict_length, scan_evict_indices_heap)
 
         self.evict_candidates_heap = [(-i[1], i[2]) for i in evict_candidates_heap]
         heapq.heapify(self.evict_candidates_heap)
         self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
-        self.max_loss_candidates = self.evict_candidates_heap[0][0] if len(self.evict_candidates_heap) > 0 else -(10**9)
-
-        self.update_imgs_path_list()
+        self.max_loss_candidates = self.evict_candidates_heap[0][0] if len(self.evict_candidates_heap) > 0 else -(10 ** 9)
 
         del scan_evict_indices_heap, evict_candidates_heap
         gc.collect()    # invoke garbage collector manually
