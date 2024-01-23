@@ -15,6 +15,8 @@ import os
 import queue
 import threading
 import warnings
+import copy
+import time
 
 from typing import Any, Callable, Iterable, TypeVar, Generic, List, Optional, Union
 
@@ -29,7 +31,7 @@ from torch._utils import ExceptionWrapper
 
 from torch.utils.data.datapipes.datapipe import IterDataPipe, MapDataPipe
 from torch.utils.data.dataset import Dataset, IterableDataset
-from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, BatchSampler
+from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, SubsetRandomSampler, BatchSampler
 from sampler import BundleRandomSampler, SizedBatchSampler
 
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper, _MapDataPipeSerializationWrapper
@@ -256,13 +258,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                                  'and is mutually exclusive with drop_last')
 
         self.file_idx = self.dataset.imgs
-        self.cache_idx = self.cache_dataset.samples.keys()
-
-        # initialize _cache_sampler
-        if self.shuffle and len(self.cache_idx) > 0:
-            self._cache_sampler = RandomSampler(self.cache_idx, generator=generator)
-        else:
-            self._cache_sampler = SequentialSampler(self.cache_idx)
+        self.cache_idx = list(self.cache_dataset.samples.keys())
 
         self.batch_size = batch_size
         self.drop_last = drop_last
@@ -298,9 +294,17 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             return _InfiniteConstantSampler()
         else:  # map-style
             if self.shuffle:
-                return RandomSampler(self.file_idx, generator=self.generator)  # type: ignore[arg-type]
+                return SubsetRandomSampler(self.file_idx, generator=self.generator)  # type: ignore[arg-type]
             else:
                 return SequentialSampler(self.file_idx)  # type: ignore[arg-type]
+
+    @property
+    def _cache_sampler(self):
+        # initialize _cache_sampler
+        if self.shuffle and len(self.cache_idx) > 0:
+            return SubsetRandomSampler(self.cache_idx, generator=self.generator)
+        else:
+            return SequentialSampler(self.cache_idx)
 
     @property
     def _file_batch_sampler(self):
@@ -323,11 +327,18 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
     # since '_BaseDataLoaderIter' references 'DataLoader'.
     def __iter__(self) -> '_BaseDataLoaderWithCacheIter':
         # reset index
-        self.cache_dataset.make_evict_candidates()
-        self.dataset.update_imgs_path_list(rm_indices=self.cache_dataset.samples.keys())
-        # update samples in datset
-        self.file_idx = self.dataset.imgs
-        self.cache_idx = self.cache_dataset.samples.keys()
+        rm_indices, add_indices = self.cache_dataset.make_evict_candidates()
+
+        # update samples in dataset
+        self.dataset.imgs = copy.deepcopy(self.dataset.samples_dict)
+        for index in sorted(self.cache_dataset.samples.keys(), reverse=True):
+            del self.dataset.imgs[index]
+
+        self.file_idx = list(self.dataset.imgs)
+        self.cache_idx = list(self.cache_dataset.samples.keys())
+
+        self.file_sampler = self._file_sampler
+        self.cache_sampler = self._cache_sampler
 
         # When using a single worker the returned iterator should be
         # created everytime to avoid resetting its state
@@ -408,7 +419,6 @@ class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
             shared_rng.manual_seed(self._shared_seed)
             self._dataset = torch.utils.data.graph_settings.apply_random_seed(self._dataset, shared_rng)
 
-
 class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _SingleProcessDataLoaderIter):
     def __init__(self, loader):
         #super(_SingleProcessDataLoaderIter, self).__init__(loader)
@@ -424,9 +434,7 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
 
         cache_data = []
         try:
-            cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
-        except ZeroDivisionError:   # At first epoch, len(cache_sampler) is 0
-            pass
+            cache_data = [self._cache_dataset[idx] for idx in next(self._cache_sampler_iter)]
         except StopIteration:
             pass
 
@@ -729,9 +737,7 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
         # append `cache_data`
         cache_data = []
         try:
-            cache_data = [self._dataset[idx] for idx in next(self._cache_sampler_iter)]
-        except ZeroDivisionError:  # At first epoch, len(cache_sampler) is 0
-            pass
+            cache_data = [self._cache_dataset[idx] for idx in next(self._cache_sampler_iter)]
         except StopIteration:
             pass
         if len(cache_data) > 0:

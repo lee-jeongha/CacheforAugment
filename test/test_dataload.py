@@ -8,7 +8,7 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
     mvif = ImageFolderWithCache(root=root, transform=transform)
     mvcd = CachedDataset(cache_length=int(len(mvif) * cache_ratio), evict_ratio=evict_ratio,
                          min_reuse_factor=min_reuse_factor, extra_transform=transform_block)
-    dl = DataLoaderWithCache(mvif, mvcd, batch_size=4, shuffle=True, num_workers=2)#, num_threads=2)
+    dl = DataLoaderWithCache(mvif, mvcd, batch_size=16, shuffle=True, num_workers=4)#, num_threads=2)
 
     for epoch in range(epochs):
         start = time.time()
@@ -20,7 +20,7 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
                 mvcd.cache_batch(idx, data, target, torch.rand(len(idx)))
             else:
                 raise Exception("criteria has to be 'random'")
-                #mvif.cache_batch(idx, data, target, loss)
+                #mvcd.cache_batch(idx, data, target, loss)
 
         end = time.time()
         print(end - start)
