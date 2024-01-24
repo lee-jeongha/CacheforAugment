@@ -15,6 +15,7 @@ import os
 import queue
 import threading
 import warnings
+import copy
 
 from typing import Any, Callable, Iterable, TypeVar, Generic, List, Optional, Union
 
@@ -29,7 +30,7 @@ from torch._utils import ExceptionWrapper
 
 from torch.utils.data.datapipes.datapipe import IterDataPipe, MapDataPipe
 from torch.utils.data.dataset import Dataset, IterableDataset
-from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, BatchSampler
+from torch.utils.data.sampler import Sampler, SequentialSampler, RandomSampler, SubsetRandomSampler, BatchSampler
 from sampler import BundleRandomSampler, SizedBatchSampler
 
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper, _MapDataPipeSerializationWrapper
@@ -257,12 +258,12 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                 raise ValueError('batch_size=None option disables auto-batching '
                                  'and is mutually exclusive with drop_last')
 
-        self.file_idx = dataset.imgs.keys()
-        self.cache_idx = dataset.cache_sample.keys()
+        self.file_idx = list(dataset.imgs.keys())
+        self.cache_idx = list(dataset.cache_sample.keys())
 
         # initialize _cache_sampler
         if self.shuffle and len(self.cache_idx) > 0:
-            self._cache_sampler = RandomSampler(self.cache_idx, generator=generator)
+            self._cache_sampler = SubsetRandomSampler(self.cache_idx, generator=generator)
         else:
             self._cache_sampler = SequentialSampler(self.cache_idx)
 
@@ -272,7 +273,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             self._file_sampler = _InfiniteConstantSampler()
         else:  # map-style
             if self.shuffle:
-                self._file_sampler = RandomSampler(self.file_idx, generator=generator)  # type: ignore[arg-type]
+                self._file_sampler = SubsetRandomSampler(self.file_idx, generator=generator)  # type: ignore[arg-type]
             else:
                 self._file_sampler = SequentialSampler(self.file_idx)  # type: ignore[arg-type]
 
@@ -321,6 +322,10 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
     # We quote '_BaseDataLoaderIter' since it isn't defined yet and the definition can't be moved up
     # since '_BaseDataLoaderIter' references 'DataLoader'.
     def __iter__(self) -> '_BaseDataLoaderWithCacheIter':
+        # reset index
+        self.file_idx = copy.deepcopy(list(self.dataset.imgs.keys()))
+        self.cache_idx = copy.deepcopy(list(self.dataset.cache_sample.keys()))
+
         # When using a single worker the returned iterator should be
         # created everytime to avoid resetting its state
         # However, in the case of a multiple workers iterator
@@ -334,10 +339,6 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             return self._iterator
         else:
             return self._get_iterator()
-
-        # reset index
-        self.file_idx = copy.deepcopy(set(dataset.imgs.keys()))
-        self.cache_idx = copy.deepcopy(set(dataset.cache_sample.keys()))
 
     @property
     def _file_index_sampler(self):

@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import os, sys, argparse
 import test_model_utils as utils
+import time
 
 class ImageFolder_with_loading_time(torchvision.datasets.ImageFolder):
     def __getitem__(self, index: int):
