@@ -485,7 +485,7 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
             index_queue.cancel_join_thread()
             w = multiprocessing_context.Process(
                 target=worker._worker_loop_with_multithread,
-                args=(self._dataset_kind, self._dataset, index_queue,
+                args=(self._dataset_kind, self._dataset, self._cache_dataset, self._cache_sampler_iter, index_queue,
                       self._worker_result_queue, self._workers_done_event,
                       self._auto_collation, self._collate_fn, self._drop_last,
                       self._base_seed, self._worker_init_fn, i, self._num_workers,
@@ -734,15 +734,6 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
         self._try_put_index()
         if isinstance(data, ExceptionWrapper):
             data.reraise()
-        # append `cache_data`
-        cache_data = []
-        try:
-            cache_data = [self._cache_dataset[idx] for idx in next(self._cache_sampler_iter)]
-        except StopIteration:
-            pass
-        if len(cache_data) > 0:
-            cache_data = _utils.collate.default_collate(cache_data)
-            data = [torch.concat((i, j)) for (i, j) in zip(data, cache_data)]
         return data
 
     def _mark_worker_as_unavailable(self, worker_id, shutdown=False):
