@@ -47,7 +47,16 @@ class SizedBatchSampler(Sampler[List[int]]):
         if self._batch_size <= 0:
             return
 
-        batch = [0] * self._batch_size
+        sampler_iter = iter(self.sampler)
+        while True:
+            try:
+                batch = [next(sampler_iter) for _ in range(self._batch_size)]
+                yield batch
+                #self.batch_counter += 1
+            except StopIteration:
+                break
+
+        '''batch = [0] * self._batch_size
         idx_in_batch = 0
         for idx in self.sampler:
             if self.batch_counter > self.batch_num:
@@ -61,7 +70,7 @@ class SizedBatchSampler(Sampler[List[int]]):
                 batch = [0] * self._batch_size
         if idx_in_batch > 0:
             yield batch[:idx_in_batch]
-            self.batch_counter += 1
+            self.batch_counter += 1'''
 
     @property
     def _batch_size(self):
