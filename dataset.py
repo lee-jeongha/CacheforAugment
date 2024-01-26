@@ -94,8 +94,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         self.transform = extra_transform
         self.target_transform = extra_target_transform
 
-        self.samples = dict()              # {‘index’: (memoryview(data), memoryview(target), reuse_factor, -abs(loss))}
-        self.temp_samples = []             # [ (-abs(loss), index, memoryview(data), memoryview(target), reuse_factor) ] -> min heap
+        self.samples = dict()              # {‘index’: (data, target, reuse_factor, -abs(loss))}
+        self.temp_samples = []             # [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()   # { index }
         self.max_loss_candidates = -(10 ** 9)
 
@@ -107,16 +107,12 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
+        try:
+            sample, target, reuse_factor, loss = self.samples[index]
+        except KeyError:
+            print(index, index in self.idx_to_be_dismissed)
         start = time.time()
-
-        sample, target, reuse_factor, loss = self.samples[index]
         self.samples[index][2].value += 1
-
-        if index in self.idx_to_be_dismissed:
-            try:
-                heapq.heapreplace(self.temp_samples, (loss, index))
-            except IndexError:
-                heapq.heappush(self.temp_samples, (loss, index))
 
         # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
         #sample = torchvision.transforms.functional.to_pil_image(torch.from_numpy(np.asarray(sample)))
@@ -134,10 +130,78 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         return index, sample, target, (end-start)
 
     def _cache(self, idx, sample, target, reuse_factor=0, loss=0):
-        #self.samples[idx] = [ memoryview(sample.numpy()), memoryview(array.array('I', [target])), reuse_factor, loss ]
-        self.samples[idx] = [ sample.to(torch.float16).numpy(), np.int64(target), mp.Value('i',reuse_factor), loss ]
-        #self.samples[idx] = [ sample.numpy(), np.int64(target), Value('i', reuse_factor), Value('d', loss) ]
-        #self.samples[idx] = shared_memory.ShareableList( [sample.numpy(), np.int64(target), reuse_factor, loss] )
+        """
+        Args:
+            idx (int): Dataset Index
+            sample (ndarray(dtype=float16)):
+            target (ndarray(dtype=float32)):
+            reuse_factor (int)
+            loss (float): Negative Absolute Loss of samples
+        """
+
+        #self.samples[idx] = [ memoryview(sample), memoryview(array.array('I', [target])), reuse_factor, loss ]
+        self.samples[idx] = [ sample, target, mp.Value('i',reuse_factor), loss ]
+        #self.samples[idx] = [ sample, target, Value('i', reuse_factor), Value('d', loss) ]
+        #self.samples[idx] = shared_memory.ShareableList( [sample, target, reuse_factor, loss] )
+
+    def _temp_cache(self, caching_idx, caching_samples, caching_targets, caching_losses):
+        """
+        Args:
+            caching_idx (List(int)): List of Dataset Index
+            caching_samples (ndarray(dtype=float16)):
+            caching_targets (ndarray(dtype=float32):
+            caching_losses (List(float)): List of Negative Absolute Loss of samples
+        """
+
+        for (index, sample, target, loss) in zip(caching_idx, caching_samples, caching_targets, caching_losses):
+            if (not len(self.samples)) and (len(self.temp_samples) < self.cache_length):
+                """
+                Case 2. On the first epoch
+                `self.samples` has not been decided
+                All data structures related to evict will be used in the same size as `self.samples`
+                """
+                # insert
+                heapq.heappush(self.temp_samples, (loss, index, sample, target))
+
+            else:
+                try:
+                    """evicted == (e_loss, e_idx, e_sample, e_target, e_reuse_factor)"""
+                    evicted = heapq.heappushpop(self.temp_samples, (loss, index, sample, target))
+                    del evicted
+                except IndexError:
+                    print("error on cache_batch: temp_sample is empty")
+                    return
+
+        '''cache_data = list(zip(caching_losses, caching_idx, caching_samples, caching_targets))
+        heapq.heapify(cache_data)
+
+        if (not len(self.samples)) and (len(self.temp_samples) < self.cache_length):
+            """
+            Case 2. On the first epoch
+            `self.samples` has not been decided
+            All data structures related to evict will be used in the same size as `self.samples`
+            """
+            n = self.cache_length - len(self.temp_samples)
+
+            # insert
+            self.temp_samples = list(heapq.merge(self.temp_samples, cache_data[:n]))
+            # replace
+            for cd in cache_data[n:]:
+                evicted = heapq.heappushpop(self.temp_samples, cd)
+                del evicted
+
+        else:
+            try:
+                # replace
+                for cd in cache_data:
+                    """evicted == (e_loss, e_idx, e_sample, e_target, e_reuse_factor)"""
+                    evicted = heapq.heappushpop(self.temp_samples, cd)
+                    del evicted
+            except IndexError:
+                print("error on cache_batch: temp_sample is empty")
+                return
+        #print("cache:", time.time() - start); exit()
+        del cache_data'''
 
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
         """
@@ -148,57 +212,32 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
             loss (Tensor(dtype=float)): Loss tensor of samples.
         """
 
-        """
-        If the current epoch is less than `self.min_reuse_factor`, the `self.idx_to_be_dismissed` might be empty.
-        """
         if (len(self.idx_to_be_dismissed) <= 0) and (len(self.samples) >= self.cache_length):
+            """
+            Case 1. If the current epoch is less than `self.min_reuse_factor`
+            `self.idx_to_be_dismissed` might be empty.
+            """
             return
 
         possibly_batched_index = possibly_batched_index.to('cpu')
-        samples = samples.to('cpu')
+        samples = samples.to('cpu').detach()
         targets = targets.to('cpu')
-        losses = losses.to('cpu')
-
-        neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
-        loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
+        losses = losses.to('cpu').detach()
 
         idx_copy = copy.deepcopy(possibly_batched_index)
         idx_condi = idx_copy.apply_(lambda x: x not in self.samples).bool()
 
-        condi = torch.mul(idx_condi, loss_condi)
+        neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
+        loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
 
-        caching_idx = possibly_batched_index[condi == 1]
-        caching_samples = samples[condi == 1]
-        caching_targets = targets[condi == 1]
-        caching_losses = neg_abs_losses[condi == 1]
+        condi = torch.mul(idx_condi, loss_condi).bool()
 
-        start = time.time()
+        caching_idx = possibly_batched_index[condi == 1].tolist()
+        caching_samples = samples[condi == 1].to(torch.float16).numpy()
+        caching_targets = targets[condi == 1].numpy()
+        caching_losses = neg_abs_losses[condi == 1].tolist()
 
-        for (index, sample, target, loss) in zip(caching_idx, caching_samples, caching_targets, caching_losses):
-            idx = index.item()
-
-            if len(self.temp_samples) < self.evict_length:
-                # insert
-                heapq.heappush(self.temp_samples, (loss, idx, sample, target, 0))
-
-            elif (len(self.samples) == 0) and (len(self.temp_samples) < self.cache_length):
-                """
-                `self.samples` has not been decided on the first epoch.
-                All data structures related to evict will be used in the same size as `self.samples`
-                """
-                # insert
-                heapq.heappush(self.temp_samples, (loss, idx, sample, target, 0))
-
-            else:
-                try:
-                    """
-                    evicted == (e_loss, e_idx, e_sample, e_target, e_reuse_factor)
-                    """
-                    evicted = heapq.heapreplace(self.temp_samples, (loss, idx, sample, target, 0))
-                    del evicted
-                except IndexError:
-                    print("error on cache_batch: temp_sample is empty")
-                    return
+        self._temp_cache(caching_idx, caching_samples, caching_targets, caching_losses)
 
         self.max_loss_candidates = self.temp_samples[0][0] if len(self.temp_samples) > 0 else -(10 ** 9)
 
@@ -238,6 +277,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                 heapq.heappush(scan_evict_indices_heap, (v[2].value, v[3], k))
         evict_candidates_heap = heapq.nsmallest(self.evict_length, scan_evict_indices_heap)
 
+        self.temp_samples = [(i[1], i[2]) for i in evict_candidates_heap]
+        heapq.heapify(self.temp_samples)
         self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
         self.max_loss_candidates = evict_candidates_heap[0][1] if len(evict_candidates_heap) > 0 else -(10 ** 9)
 
@@ -247,17 +288,18 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         return rm_indices, add_indices
 
     def cache_temp_samples(self):
-        new_indices = {ts[1] for ts in self.temp_samples}
-        rm_indices = self.idx_to_be_dismissed - new_indices
-        add_indices = new_indices - self.idx_to_be_dismissed
+        current_indices = {ts[1] for ts in self.temp_samples}
+        remain_indices = current_indices.intersection(self.idx_to_be_dismissed)
+        rm_indices = self.idx_to_be_dismissed - remain_indices
+        add_indices = remain_indices - self.idx_to_be_dismissed
 
         # for add in add_indices:
         for ts in self.temp_samples:
             try:
-                self._cache(idx=ts[1], sample=ts[2], target=ts[3], reuse_factor=ts[4], loss=ts[0])
+                self._cache(idx=ts[1], sample=ts[2], target=ts[3], reuse_factor=0, loss=ts[0])
             except IndexError:
                 """
-                Some of the things in `self.idx_to_be_dismissed` that hasn't been evicted
+                Some of the elements in `self.idx_to_be_dismissed` that hasn't been evicted
                 """
                 assert ts[1] in self.idx_to_be_dismissed, "cache_temp_samples error."
 
