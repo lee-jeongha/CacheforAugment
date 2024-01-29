@@ -261,6 +261,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         self.cache_idx = list(self.cache_dataset.samples.keys())
 
         self.batch_size = batch_size
+        self.batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
         self.drop_last = drop_last
         self.generator = generator
         self.file_sampler = self._file_sampler
@@ -308,13 +309,11 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
 
     @property
     def _file_batch_sampler(self):
-        batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
-        return SizedBatchSampler(self._file_sampler, batch_num, True)
+        return SizedBatchSampler(self._file_sampler, self.batch_num, True)
 
     @property
     def _cache_batch_sampler(self):
-        batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
-        return SizedBatchSampler(self._cache_sampler, batch_num, False)
+        return SizedBatchSampler(self._cache_sampler, self.batch_num, False)
 
     def _get_iterator(self) -> '_BaseDataLoaderWithCacheIter':
         if self.num_workers == 0:
@@ -425,8 +424,12 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
         #super(_BaseDataLoaderWithCacheIter, self).__init__(loader)
         super(_SingleProcessDataLoaderWithCacheIter, self).__init__(loader)
 
-        self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
-            self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
+        if loader.num_threads:
+            self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
+                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
+        else:
+            self._dataset_fetcher = _DatasetKind.create_fetcher(
+                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last)
 
     def _next_data(self):
         index = self._next_index()  # may raise StopIteration

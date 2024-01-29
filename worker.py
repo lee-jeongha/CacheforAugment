@@ -49,7 +49,7 @@ def _worker_loop_with_multithread(dataset_kind, dataset, cache_dataset, cache_sa
         _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers,
                                   seed=seed, dataset=dataset)
 
-        # from torch.utils.data import _DatasetKind
+        from torch.utils.data import _DatasetKind
         from dataloader import _MultithreadDatasetKind
 
         init_exception = None
@@ -58,7 +58,10 @@ def _worker_loop_with_multithread(dataset_kind, dataset, cache_dataset, cache_sa
             if init_fn is not None:
                 init_fn(worker_id)
 
-            fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+            if num_threads:
+                fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+            else:
+                fetcher = _DatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last)
         except Exception:
             init_exception = ExceptionWrapper(
                 where="in DataLoader worker process {}".format(worker_id))
@@ -95,8 +98,12 @@ def _worker_loop_with_multithread(dataset_kind, dataset, cache_dataset, cache_sa
                     dataset = apply_random_seed(dataset, shared_rng)
 
                 # Recreate the fetcher for worker-reuse policy
-                fetcher = _MultithreadDatasetKind.create_fetcher(
-                    dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+                if num_threads:
+                    fetcher = _MultithreadDatasetKind.create_fetcher(
+                        dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+                else:
+                    fetcher = _DatasetKind.create_fetcher(
+                        dataset_kind, dataset, auto_collation, collate_fn, drop_last)
                 continue
             elif r is None:
                 # Received the final signal
