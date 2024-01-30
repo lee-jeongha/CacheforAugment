@@ -48,7 +48,7 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
         _worker_info = WorkerInfo(id=worker_id, num_workers=num_workers,
                                   seed=seed, dataset=dataset)
 
-        # from torch.utils.data import _DatasetKind
+        from torch.utils.data import _DatasetKind
         from dataloader import _MultithreadDatasetKind
 
         init_exception = None
@@ -56,8 +56,11 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
         try:
             if init_fn is not None:
                 init_fn(worker_id)
+            if num_threads:
+                fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+            else:
+                fetcher = _DatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last)
 
-            fetcher = _MultithreadDatasetKind.create_fetcher(dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
         except Exception:
             init_exception = ExceptionWrapper(
                 where="in DataLoader worker process {}".format(worker_id))
@@ -94,8 +97,12 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
                     dataset = apply_random_seed(dataset, shared_rng)
 
                 # Recreate the fetcher for worker-reuse policy
-                fetcher = _MultithreadDatasetKind.create_fetcher(
-                    dataset_kind, dataset, auto_collation, collate_fn, drop_last, False, num_threads)
+                if num_threads:
+                    fetcher = _MultithreadDatasetKind.create_fetcher(
+                        dataset_kind, dataset, auto_collation, collate_fn, drop_last, num_threads)
+                else:
+                    fetcher = _DatasetKind.create_fetcher(
+                        dataset_kind, dataset, auto_collation, collate_fn, drop_last)
                 continue
             elif r is None:
                 # Received the final signal
@@ -115,7 +122,7 @@ def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue
                 try:
                     data = fetcher.fetch(index)
                 except Exception as e:
-                    if isinstance(e, StopIteration) and dataset_kind == _MultithreadDatasetKind.Iterable:
+                    if isinstance(e, StopIteration) and ((dataset_kind == _MultithreadDatasetKind.Iterable) or (dataset_kind == _DatasetKind.Iterable)):
                         data = _IterableDatasetStopIteration(worker_id)
                         # Set `iteration_end`
                         #   (1) to save future `next(...)` calls, and

@@ -491,8 +491,12 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
         #super(_BaseDataLoaderWithCacheIter, self).__init__(loader)
         super(_SingleProcessDataLoaderWithCacheIter, self).__init__(loader)
 
-        self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
-            self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
+        if self._num_threads:
+            self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
+                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
+        else:
+            self._dataset_fetcher = _DatasetKind.create_fetcher(
+                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last)
 
     def _next_data(self):
         index = self._next_index()  # may raise StopIteration
@@ -760,7 +764,7 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
             assert not self._shutdown and self._tasks_outstanding > 0
             idx, data = self._get_data()
             self._tasks_outstanding -= 1
-            if self._dataset_kind == _MultithreadDatasetKind.Iterable:
+            if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
                 # Check for _IterableDatasetStopIteration
                 if isinstance(data, _utils.worker._IterableDatasetStopIteration):
                     if self._persistent_workers:
