@@ -326,15 +326,15 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
     # since '_BaseDataLoaderIter' references 'DataLoader'.
     def __iter__(self) -> '_BaseDataLoaderWithCacheIter':
         # reset index
-        rm_indices, add_indices = self.cache_dataset.make_evict_candidates()
+        self.cache_dataset.make_evict_candidates()
 
         # update samples in dataset
         self.dataset.imgs = copy.deepcopy(self.dataset.samples_dict)
-        for index in sorted(self.cache_dataset.samples.keys(), reverse=True):
+        for index in sorted(self.cache_dataset.sample_info.keys(), reverse=True):
             del self.dataset.imgs[index]
 
         self.file_idx = list(self.dataset.imgs)
-        self.cache_idx = list(self.cache_dataset.samples.keys())
+        self.cache_idx = list(self.cache_dataset.sample_info.keys())
 
         self.file_sampler = self._file_sampler
         self.cache_sampler = self._cache_sampler

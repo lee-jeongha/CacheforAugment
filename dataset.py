@@ -1,9 +1,16 @@
 import torch, torchvision
+from tensordict import MemoryMappedTensor
+from tensordict import TensorDict
+from tensordict.prototype import tensorclass
+from torch.utils.data import DataLoader
+from torch.utils.data.sampler import SubsetRandomSampler
 import numpy as np
 from typing import Any, Callable, Optional, Tuple
 from PIL import Image
 import heapq, gc, time, copy
 import multiprocessing as mp
+from operator import itemgetter
+import tqdm
 
 IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".pgm", ".tif", ".tiff", ".webp")
 
@@ -78,6 +85,46 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         return index, sample, target, (end-start)
 
+# Tensorclass
+@tensorclass
+class MemMapData:
+    indices: torch.Tensor
+    images: torch.Tensor
+    targets: torch.Tensor
+
+    @classmethod
+    def from_dataset(cls, cache_sample, batch_size, num_workers):
+        data = cls(
+            indices=MemoryMappedTensor.empty((len(cache_sample),), dtype=torch.int64),
+            images=MemoryMappedTensor.empty(
+                (
+                    len(cache_sample),
+                    *cache_sample[next(iter(cache_sample))][2].squeeze().shape,
+                ),
+                dtype=torch.float16,
+            ),
+            targets=MemoryMappedTensor.empty((len(cache_sample),), dtype=torch.int64),
+            batch_size=[len(cache_sample)],
+        )
+        # locks the tensorclass and ensures that is_memmap will return True.
+        data.memmap_()
+
+        dl = DataLoader(cache_sample, batch_size=batch_size, num_workers=num_workers,
+                        sampler=SubsetRandomSampler(list(cache_sample.keys())))
+        i = 0
+        pbar = tqdm.tqdm(total=len(cache_sample))
+        for loss, index, image, target in dl:
+            _batch = image.shape[0]
+            pbar.update(_batch)
+            #print(data, type(data))
+            #print(cls(images=image, targets=target, batch_size=[_batch]))
+            data[i : i + _batch] = cls(
+                indices=index, images=image, targets=target, batch_size=[_batch]
+            )
+            i += _batch
+
+        return data
+
 # CachedDataset
 class CachedDataset(torchvision.datasets.DatasetFolder):
     def __init__(
@@ -94,7 +141,10 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         self.transform = extra_transform
         self.target_transform = extra_target_transform
 
-        self.samples = dict()              # {‘index’: (data, target, reuse_factor, -abs(loss))}
+        self.samples = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
+                                   'images': torch.empty((0, 1), dtype=torch.float16),
+                                   'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
+        self.sample_info = dict()       # {‘index’: (position_index, reuse_factor, -abs(loss))}
         self.temp_samples = []             # [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()   # { index }
         self.max_loss_candidates = -(10 ** 9)
@@ -107,16 +157,23 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
+        start = time.time()
+
         try:
-            sample, target, reuse_factor, loss = self.samples[index]
+            pos_idx, _, _ = self.sample_info[index]
+            assert self.samples[pos_idx].indices.item() == index, "error on __getitem__"
+            sample = self.samples[pos_idx].images   #self.samples.get_at(key='images', index=pos_idx)
+            target = self.samples[pos_idx].targets   #.get_at(key='targets', index=pos_idx)
         except KeyError:
             print(index, index in self.idx_to_be_dismissed)
-        start = time.time()
-        self.samples[index][2].value += 1
+        except AssertionError:
+            print(self.samples[pos_idx].indices.item(), index)
+
+        self.sample_info[index][1].value += 1
 
         # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
-        #sample = torchvision.transforms.functional.to_pil_image(torch.from_numpy(np.asarray(sample)))
-        sample = torch.from_numpy(np.asarray(sample)).to(torch.float32)
+        #sample = torchvision.transforms.functional.to_pil_image(sample)
+        sample = sample.to(torch.float32)
         target = target
         #import matplotlib.pyplot as plt;    plt.imshow(np.asarray(sample)); plt.show(); exit()
 
@@ -129,21 +186,6 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         return index, sample, target, (end-start)
 
-    def _cache(self, idx, sample, target, reuse_factor=0, loss=0):
-        """
-        Args:
-            idx (int): Dataset Index
-            sample (ndarray(dtype=float16)):
-            target (ndarray(dtype=float32)):
-            reuse_factor (int)
-            loss (float): Negative Absolute Loss of samples
-        """
-
-        #self.samples[idx] = [ memoryview(sample), memoryview(array.array('I', [target])), reuse_factor, loss ]
-        self.samples[idx] = [ sample, target, mp.Value('i',reuse_factor), loss ]
-        #self.samples[idx] = [ sample, target, Value('i', reuse_factor), Value('d', loss) ]
-        #self.samples[idx] = shared_memory.ShareableList( [sample, target, reuse_factor, loss] )
-
     def _temp_cache(self, caching_idx, caching_samples, caching_targets, caching_losses):
         """
         Args:
@@ -154,7 +196,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         """
 
         for (index, sample, target, loss) in zip(caching_idx, caching_samples, caching_targets, caching_losses):
-            if (not len(self.samples)) and (len(self.temp_samples) < self.cache_length):
+            if (not len(self.sample_info)) and (len(self.temp_samples) < self.cache_length):
                 """
                 Case 2. On the first epoch
                 `self.samples` has not been decided
@@ -212,7 +254,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
             loss (Tensor(dtype=float)): Loss tensor of samples.
         """
 
-        if (len(self.idx_to_be_dismissed) <= 0) and (len(self.samples) >= self.cache_length):
+        if (len(self.idx_to_be_dismissed) <= 0) and (len(self.sample_info) >= self.cache_length):
             """
             Case 1. If the current epoch is less than `self.min_reuse_factor`
             `self.idx_to_be_dismissed` might be empty.
@@ -225,7 +267,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         losses = losses.to('cpu').detach()
 
         idx_copy = copy.deepcopy(possibly_batched_index)
-        idx_condi = idx_copy.apply_(lambda x: x not in self.samples).bool()
+        idx_condi = idx_copy.apply_(lambda x: x not in self.sample_info).bool()
 
         neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
         loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
@@ -233,48 +275,29 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         condi = torch.mul(idx_condi, loss_condi).bool()
 
         caching_idx = possibly_batched_index[condi == 1].tolist()
-        caching_samples = samples[condi == 1].to(torch.float16).numpy()
-        caching_targets = targets[condi == 1].numpy()
+        caching_samples = samples[condi == 1].to(torch.float16)#.numpy()
+        caching_targets = targets[condi == 1].tolist()#numpy()
         caching_losses = neg_abs_losses[condi == 1].tolist()
 
         self._temp_cache(caching_idx, caching_samples, caching_targets, caching_losses)
 
         self.max_loss_candidates = self.temp_samples[0][0] if len(self.temp_samples) > 0 else -(10 ** 9)
 
-    def release_from_idx(self, idx: int, has_to_delete_idx=False):
-        sample, target, reuse_factor, _ = self.samples[idx]
-        rf = reuse_factor.value
-
-        #sample.release()    # memoryview
-        #target.release()    # memoryview
-        del sample
-        del target
-        del reuse_factor
-
-        del self.samples[idx]
-
-        if has_to_delete_idx:
-            # Some elements that have been replaced in this epoch may not be in the `self.idx_to_be_dismissed`.
-            # -> use `set().discard()` instead of `set().remove()`
-            self.idx_to_be_dismissed.discard(idx)
-
-        return rf
-
     def make_evict_candidates(self):
         """
         0. cache all elements in `self.temp_samples`
-        1. Making heap by scanning all the elements in `self.samples`: that `reuse_factor` exceeds min value
+        1. Making heap by scanning all the elements in `self.sample_info`: that `reuse_factor` exceeds min value
             -> heap has (reuse_factor, loss, index) as value
         2. Extract from heap using `heapq.nsmallest(num, q)`
         3. Remove the `reuse_factor` from the heap element tuple
         4. `update_imgs_path_list()`
         """
-        rm_indices, add_indices = self.cache_temp_samples()
+        self.cache_temp_samples()
 
         scan_evict_indices_heap = []    # [ (reuse_factor, -abs(loss), index) ]
-        for k, v in self.samples.items():
-            if (v[2].value >= self.min_reuse_factor):
-                heapq.heappush(scan_evict_indices_heap, (v[2].value, v[3], k))
+        for k, v in self.sample_info.items():    # {‘index’: (position_index, reuse_factor, -abs(loss))}
+            if (v[1].value >= self.min_reuse_factor):
+                heapq.heappush(scan_evict_indices_heap, (v[1].value, v[2], k))
         evict_candidates_heap = heapq.nsmallest(self.evict_length, scan_evict_indices_heap)
 
         self.temp_samples = [(i[1], i[2]) for i in evict_candidates_heap]
@@ -285,27 +308,49 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         del scan_evict_indices_heap, evict_candidates_heap
         gc.collect()    # invoke garbage collector manually
 
-        return rm_indices, add_indices
+        return
 
     def cache_temp_samples(self):
+        temp_samples_dict = {ts[1]: tuple(ts) for ts in self.temp_samples} # {index: (loss, index, sample, target)}
+
+        if len(self.samples) == 0 and len(self.temp_samples) == self.cache_length:
+            self.samples = MemMapData.from_dataset(temp_samples_dict, batch_size=64, num_workers=16)
+
+            for pos_idx, samp_idx in enumerate(self.samples.indices):
+                index = samp_idx.item()
+                self.sample_info[index] = (pos_idx, mp.Value('i', 0), temp_samples_dict[index][0])
+            return
+
+        elif len(self.samples) == 0:
+            return
+
         current_indices = {ts[1] for ts in self.temp_samples}
         remain_indices = current_indices.intersection(self.idx_to_be_dismissed)
-        rm_indices = self.idx_to_be_dismissed - remain_indices
-        add_indices = remain_indices - self.idx_to_be_dismissed
+        rm_indices = list(self.idx_to_be_dismissed - remain_indices)
+        add_indices = list(current_indices - remain_indices)
 
-        # for add in add_indices:
-        for ts in self.temp_samples:
-            try:
-                self._cache(idx=ts[1], sample=ts[2], target=ts[3], reuse_factor=0, loss=ts[0])
-            except IndexError:
-                """
-                Some of the elements in `self.idx_to_be_dismissed` that hasn't been evicted
-                """
-                assert ts[1] in self.idx_to_be_dismissed, "cache_temp_samples error."
+        assert len(rm_indices) == len(add_indices), "rm_indices and add_indices must be same length."
 
-        for rm in rm_indices:
-            _ = self.release_from_idx(idx=rm, has_to_delete_idx=False)
+        if len(rm_indices) <= 0:
+            return
 
-        del self.temp_samples[:]
+        rm_ = itemgetter(*rm_indices)(self.sample_info) # {index: (position_index, reuse_factor, -abs(loss))}
+        add_ = itemgetter(*add_indices)(temp_samples_dict) # {index: (loss, index, sample, target)}
 
-        return rm_indices, add_indices
+        rm_position = [rm[0] for rm in rm_]
+        add_images = torch.stack(list(map(itemgetter(2), add_)))
+        add_targets = torch.tensor(list(map(itemgetter(3), add_)))
+
+        self.samples.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
+        self.samples.set_at_(key='images', value=add_images, idx=rm_position) #, index=rm_position)
+        self.samples.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
+
+        for add, rm, pos, elements in zip(add_indices, rm_indices, rm_position, add_):
+            rm_elements = self.sample_info.pop(rm)
+            #assert rm_elements[0] == pos
+            #assert add == elements[1]
+            self.sample_info[add] = (pos, mp.Value('i', 0), elements[0])
+
+        del self.temp_samples[:], temp_samples_dict
+
+        return
