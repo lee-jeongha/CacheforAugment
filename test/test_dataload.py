@@ -1,6 +1,8 @@
 import torch, torchvision
 import multiprocessing as py_multiprocessing
 import os, sys, time
+import copy
+from itertools import zip_longest
 
 torch.multiprocessing.set_sharing_strategy('file_system')   # OSError: [Errno 24] Too many open files
 
@@ -8,12 +10,23 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
     mvif = ImageFolderWithCache(root=root, transform=transform)
     mvcd = CachedDataset(cache_length=int(len(mvif) * cache_ratio), evict_ratio=evict_ratio,
                          min_reuse_factor=min_reuse_factor, extra_transform=transform_block)
-    dl = DataLoaderWithCache(mvif, mvcd, batch_size=16, shuffle=True, num_workers=4)#, num_threads=2)
+
+    batch_size = 256
+    batch_num = int( (len(mvif)+ batch_size - 1) // batch_size )
+    ifdl = DataLoaderWithCache(mvif, batch_num=batch_num, num_workers=16, num_threads=2)
+    cddl = DataLoaderWithCache(mvcd, batch_num=batch_num, num_workers=2)
+
+    dataset_samples_dict = { idx : sample for idx, sample in enumerate(mvif.samples) }
 
     for epoch in range(epochs):
         start = time.time()
         #print(py_multiprocessing.current_process().__dict__['_name'], py_multiprocessing.active_children())
-        for (idx, data, target, _) in dl:
+        for (idata, cdata) in zip_longest(ifdl, cddl):
+
+            idx, data, target, _ = idata
+            if cdata is not None:
+                cidx, cdata, ctarget, _ = cdata
+
             d, t = (data, target)
 
             if criteria == 'random':
@@ -22,12 +35,19 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
                 raise Exception("criteria has to be 'random'")
                 #mvcd.cache_batch(idx, data, target, loss)
 
+        # update index in cache_dataset
+        mvcd.make_evict_candidates()
+        # update samples in dataset
+        mvif.imgs = copy.deepcopy(dataset_samples_dict)
+        for index in sorted(mvcd.sample_info.keys(), reverse=True):
+            del mvif.imgs[index]
+
         end = time.time()
         print(end - start)
 
 def run_default(root, transform, epochs=5):
     mvif = torchvision.datasets.ImageFolder(root=root, transform=transform)
-    dl = torch.utils.data.DataLoader(mvif, batch_size=16, shuffle=True, num_workers=4)
+    dl = torch.utils.data.DataLoader(mvif, batch_size=256, shuffle=True, num_workers=16)
 
     for epoch in range(epochs):
         start = time.time()

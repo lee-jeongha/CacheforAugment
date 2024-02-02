@@ -13,7 +13,7 @@ from torch.utils.data import _utils
 from torch.utils.data._utils.worker import *
 from torch.utils.data._utils.worker import _generate_state, _ResumeIteration, _IterableDatasetStopIteration
 
-def _worker_loop_with_multithread(dataset_kind, dataset, cache_dataset, cache_sampler_iter, index_queue, data_queue,
+def _worker_loop_with_multithread(dataset_kind, dataset, index_queue, data_queue,
                                  done_event, auto_collation, collate_fn, drop_last, base_seed, init_fn, worker_id,
                                  num_workers, persistent_workers, shared_seed, num_threads):
     # See NOTE [ Data Loader Multiprocessing Shutdown Logic ] for details on the
@@ -122,15 +122,6 @@ def _worker_loop_with_multithread(dataset_kind, dataset, cache_dataset, cache_sa
             else:
                 try:
                     data = fetcher.fetch(index)
-                    # append `cache_data`
-                    cache_data = []
-                    try:
-                        cache_data = [cache_dataset[idx] for idx in next(cache_sampler_iter)]
-                    except StopIteration:
-                        pass
-                    if len(cache_data) > 0:
-                        cache_data = _utils.collate.default_collate(cache_data)
-                        data = [torch.concat((i, j)) for (i, j) in zip(data, cache_data)]
                 except Exception as e:
                     if isinstance(e, StopIteration) and dataset_kind == _MultithreadDatasetKind.Iterable:
                         data = _IterableDatasetStopIteration(worker_id)

@@ -5,7 +5,7 @@ from tensordict.prototype import tensorclass
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 import numpy as np
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple, Sequence
 from PIL import Image
 import heapq, gc, time, copy
 import multiprocessing as mp
@@ -145,6 +145,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                                    'images': torch.empty((0, 1), dtype=torch.float16),
                                    'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
         self.sample_info = dict()       # {‘index’: (position_index, reuse_factor, -abs(loss))}
+        self.imgs = self.sample_info
         self.temp_samples = []             # [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()   # { index }
         self.max_loss_candidates = -(10 ** 9)
@@ -161,13 +162,13 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         try:
             pos_idx, _, _ = self.sample_info[index]
-            assert self.samples[pos_idx].indices.item() == index, "error on __getitem__"
             sample = self.samples[pos_idx].images   #self.samples.get_at(key='images', index=pos_idx)
             target = self.samples[pos_idx].targets   #.get_at(key='targets', index=pos_idx)
         except KeyError:
-            print(index, index in self.idx_to_be_dismissed)
-        except AssertionError:
-            print(self.samples[pos_idx].indices.item(), index)
+            try:
+                assert self.samples[pos_idx].indices.item() == index, "error on __getitem__"
+            except AssertionError:
+                print(self.samples[pos_idx].indices.item(), index)
 
         self.sample_info[index][1].value += 1
 
@@ -185,6 +186,52 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         end = time.time()
 
         return index, sample, target, (end-start)
+
+    def __getitems__(self, indices: Sequence[int]) -> Tuple[Any, Any]:
+        """
+        Args:
+            indices (sequence[int]): a sequence of indices
+
+        Returns:
+            tuple: (sample, target) where target is class_index of the target class.
+        """
+        start = time.time()
+
+        try:
+            sample_info_ = itemgetter(*indices)(self.sample_info)
+            pos_indices = list(map(itemgetter(0), sample_info_))
+            samples = self.samples.get_at(key='images', idx=pos_indices)   #.get_at(key='images', index=pos_indices)
+            targets = self.samples.get_at(key='targets', idx=pos_indices)   #.get_at(key='targets', index=pos_indices)
+        except KeyError:
+            try:
+                assert self.samples.get_at(key='indices', idx=pos_indices) == torch.tensor(indices), "error on __getitems__"
+            except AssertionError:
+                print(self.samples.get_at(key='indices', idx=pos_indices), indices)
+
+        datas = []
+        for i, (index, sample, target) in enumerate(zip(indices, samples, targets)):
+            self.sample_info[index][1].value += 1
+
+            # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
+            #sample = torchvision.transforms.functional.to_pil_image(sample)
+            sample = samples[i].to(torch.float32)
+            target = targets[i]
+            #import matplotlib.pyplot as plt;    plt.imshow(np.asarray(sample)); plt.show(); exit()
+
+            if self.transform is not None:
+                sample = self.transform(sample)
+            if self.target_transform is not None:
+                target = self.target_transform(target)
+
+            end = time.time()
+            datas.append((index, sample, target, end-start))
+
+        #datas = []
+        #for index, sample, target in zip(indices, samples, targets):
+        #    datas.append((index, sample, target, (end-start) / len(indices)))
+
+        #return indices, samples, targets, [(end-start) / len(indices)]*len(indices)
+        return datas
 
     def _temp_cache(self, caching_idx, caching_samples, caching_targets, caching_losses):
         """

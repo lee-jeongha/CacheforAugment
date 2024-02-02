@@ -82,6 +82,23 @@ class SizedBatchSampler(Sampler[List[int]]):
     def __len__(self) -> int:
         return self.batch_num
 
+class SequentialSubsetSampler(Sampler[int]):
+    r"""Samples elements sequentially from a given list of indices, without replacement.
+
+    Args:
+        indices (sequence): a sequence of indices
+    """
+    indices: Sequence[int]
+
+    def __init__(self, indices: Sequence[int]) -> None:
+        self.indices = indices
+
+    def __iter__(self) -> Iterator[int]:
+        #return iter(range(len(self.data_source)))
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
 
 class BundleRandomSampler(Sampler[int]):
     r"""Samples elements randomly in a bundle size.
