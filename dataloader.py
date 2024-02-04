@@ -55,16 +55,6 @@ class _MultithreadDatasetKind():    # torch.utils.data._DatasetKind
             return _MultithreadIterableDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, num_threads)
 
 class BundleDataLoader(torch.utils.data.DataLoader):
-    r"""
-    Data loader. Combines a dataset and a sampler, and provides an iterable over
-    the given dataset.
-
-    The :class:`~torch.utils.data.DataLoader` supports both map-style and
-    iterable-style datasets with single- or multi-process loading, customizing
-    loading order and optional automatic batching (collation) and memory pinning.
-
-    See :py:mod:`torch.utils.data` documentation page for more details.
-    """
     dataset: Dataset[T_co]
     batch_size: Optional[int]
     num_workers: int
@@ -89,11 +79,34 @@ class BundleDataLoader(torch.utils.data.DataLoader):
                  pin_memory_device: str = "",
                  bundle_ratio: Optional[float] = None,
                  alternating_order: bool = False):
-        super().__init__(dataset, batch_size, shuffle, sampler, batch_sampler, num_workers,
-                         collate_fn, pin_memory, drop_last, timeout, worker_init_fn,
-                         multiprocessing_context, generator,
-                         prefetch_factor=prefetch_factor, persistent_workers=persistent_workers,
-                         pin_memory_device=pin_memory_device)
+        torch._C._log_api_usage_once("python.data_loader")
+
+        if num_workers < 0:
+            raise ValueError('num_workers option should be non-negative; '
+                             'use num_workers=0 to disable multiprocessing.')
+
+        if timeout < 0:
+            raise ValueError('timeout option should be non-negative')
+
+        if num_workers == 0 and prefetch_factor is not None:
+            raise ValueError('prefetch_factor option could only be specified in multiprocessing.'
+                             'let num_workers > 0 to enable multiprocessing, otherwise set prefetch_factor to None.')
+        elif num_workers > 0 and prefetch_factor is None:
+            prefetch_factor = 2
+        elif prefetch_factor is not None and prefetch_factor < 0:
+            raise ValueError('prefetch_factor option should be non-negative')
+
+        if persistent_workers and num_workers == 0:
+            raise ValueError('persistent_workers option needs num_workers > 0')
+
+        self.dataset = dataset
+        self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor
+        self.pin_memory = pin_memory
+        self.pin_memory_device = pin_memory_device
+        self.timeout = timeout
+        self.worker_init_fn = worker_init_fn
+        self.multiprocessing_context = multiprocessing_context
 
         # To manage data in bundles
         if bundle_ratio:
@@ -101,6 +114,54 @@ class BundleDataLoader(torch.utils.data.DataLoader):
         else:
             self.bundle_size = None
         self.alternating_order = alternating_order
+
+        if isinstance(self.dataset, IterDataPipe):
+            self.dataset = _IterDataPipeSerializationWrapper(self.dataset)
+        elif isinstance(self.dataset, MapDataPipe):
+            self.dataset = _MapDataPipeSerializationWrapper(self.dataset)
+
+        if isinstance(dataset, IterableDataset):
+            self._dataset_kind = _DatasetKind.Iterable
+            if isinstance(dataset, IterDataPipe):
+                if shuffle is not None:
+                    dataset = torch.utils.data.graph_settings.apply_shuffle_settings(dataset, shuffle=shuffle)
+            # We cannot check `shuffle is not None` here, since previously `shuffle=False` was the default.
+            elif shuffle not in {False, None}:
+                raise ValueError(
+                    "DataLoader with IterableDataset: expected unspecified "
+                    "shuffle option, but got shuffle={}".format(shuffle))
+
+            if sampler is not None:
+                # See NOTE [ Custom Samplers and IterableDataset ]
+                raise ValueError(
+                    "DataLoader with IterableDataset: expected unspecified "
+                    "sampler option, but got sampler={}".format(sampler))
+            elif batch_sampler is not None:
+                # See NOTE [ Custom Samplers and IterableDataset ]
+                raise ValueError(
+                    "DataLoader with IterableDataset: expected unspecified "
+                    "batch_sampler option, but got batch_sampler={}".format(batch_sampler))
+        else:
+            shuffle = bool(shuffle)
+            self._dataset_kind = _DatasetKind.Map
+
+        if sampler is not None and shuffle:
+            raise ValueError('sampler option is mutually exclusive with '
+                             'shuffle')
+
+        if batch_sampler is not None:
+            # auto_collation with custom batch_sampler
+            if batch_size != 1 or shuffle or sampler is not None or drop_last:
+                raise ValueError('batch_sampler option is mutually exclusive '
+                                 'with batch_size, shuffle, sampler, and '
+                                 'drop_last')
+            batch_size = None
+            drop_last = False
+        elif batch_size is None:
+            # no auto_collation
+            if drop_last:
+                raise ValueError('batch_size=None option disables auto-batching '
+                                 'and is mutually exclusive with drop_last')
 
         if sampler is None:  # give default samplers
             if self._dataset_kind == _DatasetKind.Iterable:
@@ -128,6 +189,24 @@ class BundleDataLoader(torch.utils.data.DataLoader):
         self.sampler = sampler
         self.batch_sampler = batch_sampler
         self.generator = generator
+
+        if collate_fn is None:
+            if self._auto_collation:
+                collate_fn = _utils.collate.default_collate
+            else:
+                collate_fn = _utils.collate.default_convert
+
+        self.collate_fn = collate_fn
+        self.persistent_workers = persistent_workers
+
+        self.__initialized = True
+        self._IterableDataset_len_called = None  # See NOTE [ IterableDataset and __len__ ]
+
+        self._iterator = None
+
+        self.check_worker_number_rationality()
+
+        torch.set_vital('Dataloader', 'enabled', 'True')  # type: ignore[attr-defined]
 
 class DataLoaderWithCache(torch.utils.data.DataLoader):
     r"""
