@@ -118,7 +118,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                                    'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
         self.sample_info = dict()       # {‘index’: (position_index, reuse_factor, -abs(loss))}
         self.imgs = copy.deepcopy(self.sample_info)
-        self.temp_samples = []             # [ (-abs(loss), index, data, target) ] -> min heap
+        self.temp_samples = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()   # { index }
         self.max_loss_candidates = -(10 ** 9)
 
@@ -155,6 +155,10 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
             target = self.target_transform(target)
 
         end = time.time()
+
+        # If it is in self.idx_to_be_dismissed -> True,  else -> False
+        if index in self.idx_to_be_dismissed:
+            heapq.heappush(self.temp_samples, (self.sample_info[index][2], index))
 
         return index, sample, target, (end-start)
 
@@ -196,22 +200,75 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
             end = time.time()
             datas.append((index, sample, target, end-start))
 
-        #datas = []
-        #for index, sample, target in zip(indices, samples, targets):
-        #    datas.append((index, sample, target, (end-start) / len(indices)))
+        # datas = [zip(indices, samples, targets, [(end-start) / len(indices)]*len(indices))]
 
-        #return indices, samples, targets, [(end-start) / len(indices)]*len(indices)
+        # If it is in self.idx_to_be_dismissed -> True,  else -> False
+        dismissed_idx = list(filter(lambda x: x in self.idx_to_be_dismissed, indices))
+        dismissed_info = [self.sample_info[d_idx] for d_idx in dismissed_idx]
+        for (idx, info) in zip(dismissed_idx, dismissed_info):
+            heapq.heappush(self.temp_samples, (info[2], idx))
+
         return datas
 
-    def _temp_cache(self, caching_idx, caching_samples, caching_targets, caching_losses):
+    def filter_batch_for_caching(self, possibly_batched_index, samples, targets, losses):
         """
-        Args:
+        Returns:
             caching_idx (List(int)): List of Dataset Index
-            caching_samples (ndarray(dtype=float16)):
-            caching_targets (ndarray(dtype=float32):
+            caching_samples (torch.tensor(dtype=float16)):
+            caching_targets (torch.tensor(dtype=float32):
             caching_losses (List(float)): List of Negative Absolute Loss of samples
         """
+        idx_copy = copy.deepcopy(possibly_batched_index)
+        idx_condi = idx_copy.apply_(lambda x: x not in self.sample_info).bool()
 
+        neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
+        loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
+
+        condi = torch.mul(idx_condi, loss_condi)
+
+        caching_idx = possibly_batched_index[condi == 1].tolist()
+        caching_samples = samples[condi == 1].to(torch.float16)#.numpy()
+        caching_targets = targets[condi == 1].tolist()#numpy()
+        caching_losses = neg_abs_losses[condi == 1].tolist()
+
+        return caching_idx, caching_samples, caching_targets, caching_losses
+
+    def replace_sample(self, rm_indices, rm_position, add_losses, add_indices, add_images, add_targets):
+        self.samples.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
+        self.samples.set_at_(key='images', value=add_images, idx=rm_position) #, index=rm_position)
+        self.samples.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
+
+        for add, rm, pos, loss in zip(add_indices, rm_indices, rm_position, add_losses):
+            rm_elements = self.sample_info.pop(rm)
+            self.sample_info[add] = (pos, mp.Value('i', 0), loss)
+
+        del rm_indices, rm_position, add_losses, add_indices, add_images, add_targets
+
+    def cache_batch(self, possibly_batched_index, samples, targets, losses):
+        """
+        Args:
+            idx (Tensor(dtype=int)): Index
+            sample (Tensor):
+            target (Tensor):
+            loss (Tensor(dtype=float)): Loss tensor of samples.
+        """
+
+        if (len(self.idx_to_be_dismissed) <= 0) and (len(self.sample_info) >= self.cache_length):
+            """
+            Case 1. If the current epoch is less than `self.min_reuse_factor`
+            `self.idx_to_be_dismissed` might be empty.
+            """
+            return
+
+        possibly_batched_index = possibly_batched_index.to('cpu')
+        samples = samples.to('cpu').detach()
+        targets = targets.to('cpu')
+        losses = losses.to('cpu').detach()
+
+        (caching_idx, caching_samples,
+         caching_targets, caching_losses) = self.filter_batch_for_caching(possibly_batched_index, samples, targets, losses)
+
+        #self._temp_cache(caching_idx, caching_samples, caching_targets, caching_losses)
         cache_data = list(zip(caching_losses, caching_idx, caching_samples, caching_targets))
         cache_data = sorted(cache_data, key=itemgetter(0))
 
@@ -248,54 +305,38 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                 * optimal = [-3, -3, -1, -1, 0]
             """
             evict_candidates = self.nsmallest_with_index(len(caching_idx), self.temp_samples)
+            cache_data = cache_data[:len(evict_candidates)]
             # self.temp_samples = [(loss, index, sample, target)]  for samples in current epoch
             #                   = [(loss, index)]                  for self.idx_to_be_dismissed
             # evict_candidates  = [(elem_in_`self.temp_samples`, idx_from_`self.temp_samples`)]
 
             mask = [1 if c[0] > e[0][0] else 0 for (c, e) in zip(cache_data, evict_candidates)]
-
             replace_num = mask.count(1)
+
+            if (not len(self.samples)) or (not replace_num):
+                pass
+            else:
+                # replace to `self.samples` and `self.sample_info`
+                rm_indices = [e[0][1] for e in evict_candidates[:replace_num]]
+                rm_position = [self.sample_info[rm][0] for rm in rm_indices]
+
+                add_losses = list(map(itemgetter(0), cache_data[-replace_num:]))
+                add_indices = list(map(itemgetter(1), cache_data[-replace_num:]))
+                add_images = torch.stack(list(map(itemgetter(2), cache_data[-replace_num:])))
+                add_targets = torch.tensor(list(map(itemgetter(3), cache_data[-replace_num:])))
+
+                self.replace_sample(rm_indices, rm_position, add_losses, add_indices, add_images, add_targets)
+
+                # save only losses and indices in `self.temp_samples`
+                cache_data = list(map(itemgetter(0,1), cache_data))
+
+            # replace to `self.temp_samples`
             for (c, e) in zip(cache_data[-replace_num:], evict_candidates[:replace_num]):
                 pos = e[1]
                 self.temp_samples[pos] = c
             heapq.heapify(self.temp_samples)
+
             del evict_candidates
-
-    def cache_batch(self, possibly_batched_index, samples, targets, losses):
-        """
-        Args:
-            idx (Tensor(dtype=int)): Index
-            sample (Tensor):
-            target (Tensor):
-            loss (Tensor(dtype=float)): Loss tensor of samples.
-        """
-
-        if (len(self.idx_to_be_dismissed) <= 0) and (len(self.sample_info) >= self.cache_length):
-            """
-            Case 1. If the current epoch is less than `self.min_reuse_factor`
-            `self.idx_to_be_dismissed` might be empty.
-            """
-            return
-
-        possibly_batched_index = possibly_batched_index.to('cpu')
-        samples = samples.to('cpu').detach()
-        targets = targets.to('cpu')
-        losses = losses.to('cpu').detach()
-
-        idx_copy = copy.deepcopy(possibly_batched_index)
-        idx_condi = idx_copy.apply_(lambda x: x not in self.sample_info).bool()
-
-        neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
-        loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
-
-        condi = torch.mul(idx_condi, loss_condi).bool()
-
-        caching_idx = possibly_batched_index[condi == 1].tolist()
-        caching_samples = samples[condi == 1].to(torch.float16)#.numpy()
-        caching_targets = targets[condi == 1].tolist()#numpy()
-        caching_losses = neg_abs_losses[condi == 1].tolist()
-
-        self._temp_cache(caching_idx, caching_samples, caching_targets, caching_losses)
 
         self.max_loss_candidates = self.temp_samples[0][0] if len(self.temp_samples) > 0 else -(10 ** 9)
 
@@ -308,7 +349,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         3. Remove the `reuse_factor` from the heap element tuple
         4. `update_imgs_path_list()`
         """
-        self.cache_temp_samples()
+        if (not len(self.samples)):
+            self.cache_from_temp_samples()
 
         self.imgs = copy.deepcopy(list(self.sample_info.keys()))
 
@@ -318,8 +360,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                 heapq.heappush(scan_evict_indices_heap, (v[1].value, v[2], k))
         evict_candidates_heap = heapq.nsmallest(self.evict_length, scan_evict_indices_heap)
 
-        self.temp_samples = [(i[1], i[2]) for i in evict_candidates_heap]
-        heapq.heapify(self.temp_samples)
+        del self.temp_samples[:]
         self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
         self.max_loss_candidates = evict_candidates_heap[0][1] if len(evict_candidates_heap) > 0 else -(10 ** 9)
 
@@ -328,49 +369,14 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         return
 
-    def cache_temp_samples(self):
+    def cache_from_temp_samples(self):
         temp_samples_dict = {ts[1]: tuple(ts) for ts in self.temp_samples} # {index: (loss, index, sample, target)}
 
-        if len(self.samples) == 0 and len(self.temp_samples) == self.cache_length:
-            self.samples = MemMapData.from_dataset(temp_samples_dict, batch_size=64, num_workers=16)
+        self.samples = MemMapData.from_dataset(temp_samples_dict, batch_size=64, num_workers=16)
 
-            for pos_idx, samp_idx in enumerate(self.samples.indices):
-                index = samp_idx.item()
-                self.sample_info[index] = (pos_idx, mp.Value('i', 0), temp_samples_dict[index][0])
-            return
-
-        elif len(self.samples) == 0:
-            return
-
-        current_indices = {ts[1] for ts in self.temp_samples}
-        remain_indices = current_indices.intersection(self.idx_to_be_dismissed)
-        rm_indices = list(self.idx_to_be_dismissed - remain_indices)
-        add_indices = list(current_indices - remain_indices)
-
-        assert len(rm_indices) == len(add_indices), "rm_indices and add_indices must be same length."
-
-        if len(rm_indices) <= 0:
-            return
-
-        rm_ = itemgetter(*rm_indices)(self.sample_info) # {index: (position_index, reuse_factor, -abs(loss))}
-        add_ = itemgetter(*add_indices)(temp_samples_dict) # {index: (loss, index, sample, target)}
-
-        rm_position = [rm[0] for rm in rm_]
-        add_images = torch.stack(list(map(itemgetter(2), add_)))
-        add_targets = torch.tensor(list(map(itemgetter(3), add_)))
-
-        self.samples.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
-        self.samples.set_at_(key='images', value=add_images, idx=rm_position) #, index=rm_position)
-        self.samples.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
-
-        for add, rm, pos, elements in zip(add_indices, rm_indices, rm_position, add_):
-            rm_elements = self.sample_info.pop(rm)
-            #assert rm_elements[0] == pos
-            #assert add == elements[1]
-            self.sample_info[add] = (pos, mp.Value('i', 0), elements[0])
-
-        del self.temp_samples[:], temp_samples_dict
-
+        for pos_idx, samp_idx in enumerate(self.samples.indices):
+            index = samp_idx.item()
+            self.sample_info[index] = (pos_idx, mp.Value('i', 0), temp_samples_dict[index][0])
         return
 
     def nsmallest_with_index(self, n, iterable, key=None):
