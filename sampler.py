@@ -47,7 +47,16 @@ class SizedBatchSampler(Sampler[List[int]]):
         if self._batch_size <= 0:
             return
 
-        batch = [0] * self._batch_size
+        sampler_iter = iter(self.sampler)
+        while True:
+            try:
+                batch = [next(sampler_iter) for _ in range(self._batch_size)]
+                yield batch
+                #self.batch_counter += 1
+            except StopIteration:
+                break
+
+        '''batch = [0] * self._batch_size
         idx_in_batch = 0
         for idx in self.sampler:
             if self.batch_counter > self.batch_num:
@@ -61,7 +70,7 @@ class SizedBatchSampler(Sampler[List[int]]):
                 batch = [0] * self._batch_size
         if idx_in_batch > 0:
             yield batch[:idx_in_batch]
-            self.batch_counter += 1
+            self.batch_counter += 1'''
 
     @property
     def _batch_size(self):
@@ -73,6 +82,23 @@ class SizedBatchSampler(Sampler[List[int]]):
     def __len__(self) -> int:
         return self.batch_num
 
+class SequentialSubsetSampler(Sampler[int]):
+    r"""Samples elements sequentially from a given list of indices, without replacement.
+
+    Args:
+        indices (sequence): a sequence of indices
+    """
+    indices: Sequence[int]
+
+    def __init__(self, indices: Sequence[int]) -> None:
+        self.indices = indices
+
+    def __iter__(self) -> Iterator[int]:
+        #return iter(range(len(self.data_source)))
+        return iter(self.indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
 
 class BundleRandomSampler(Sampler[int]):
     r"""Samples elements randomly in a bundle size.
