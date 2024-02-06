@@ -133,8 +133,9 @@ valset_transform = transforms.Compose([
 # ------
 def autoaugment_transform(basic_transform, p=1):
     autoaugment_transform = copy.deepcopy(basic_transform)
-    transform_block = AutoAugment_with_p(policy=transforms.AutoAugmentPolicy.CIFAR10, p=p,
-                                         pre_transforms=transforms.ToDtype(torch.uint8, scale=True))
+    transform_block = transforms.Compose([AutoAugment_with_p(policy=transforms.AutoAugmentPolicy.CIFAR10, p=p,
+                                                             pre_transforms=transforms.ToDtype(torch.uint8, scale=True)),
+                                          transforms.ToDtype(torch.float32, scale=True)])
 
     # Add AutoAugment at last
     autoaugment_transform.transforms.append(transform_block)
@@ -144,8 +145,9 @@ def autoaugment_transform(basic_transform, p=1):
 # ------
 def randaugment_transform(basic_transform, num_ops, p=1):
     randaugment_transform = copy.deepcopy(basic_transform)
-    transform_block = RandAugment_with_p(num_ops=num_ops, p=p,
-                                         pre_transforms=transforms.ToDtype(torch.uint8, scale=True))
+    transform_block = transforms.Compose([RandAugment_with_p(num_ops=num_ops, p=p,
+                                                             pre_transforms=transforms.ToDtype(torch.uint8, scale=True)),
+                                          transforms.ToDtype(torch.float32, scale=True)])
 
     # Add RandAugment at first
     randaugment_transform.transforms.append(transform_block)

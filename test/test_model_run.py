@@ -71,12 +71,12 @@ if __name__ == '__main__':
 
     if __package__ is None:
         sys.path.append(os.path.dirname( os.path.dirname( os.path.abspath(__file__) ) ))
-        from dataset import ImageFolderWithCache
+        from dataset import ImageFolderWithCache, CachedDataset
         from dataloader import DataLoaderWithCache
         from transforms import basic_transform, autoaugment_transform, randaugment_transform
 
     else:
-        from ..dataset import ImageFolderWithCache
+        from ..dataset import ImageFolderWithCache, CachedDataset
         from ..dataloader import DataLoaderWithCache
         from ..transforms import basic_transform, autoaugment_transform, randaugment_transform
 
@@ -107,25 +107,30 @@ if __name__ == '__main__':
 
     # dataset
     if (loader_type == 'proposed'):
-        train_image_folder  = ImageFolderWithCache(root=args.trainset, cache_ratio=args.cache_ratio,
-                                                  transform=basic_transform, transform_block=r_t_b)
-        test_image_folder   = ImageFolderWithCache(root=args.valset, cache_ratio=args.cache_ratio,
-                                                  transform=basic_transform)
+        train_image_folder = ImageFolderWithCache(root=args.trainset, transform=basic_transform)
+        train_image_cache  = CachedDataset(cache_length=int(len(train_image_folder) * args.cache_ratio),
+                                           evict_ratio=args.evict_ratio, min_reuse_factor=args.min_reuse_factor,
+                                           extra_transform=a_t_b)
     elif (loader_type == 'default'):
-        train_image_folder  = ImageFolder_with_loading_time(root=args.trainset, transform=rr_t)
-        test_image_folder   = ImageFolder_with_loading_time(root=args.valset, transform=basic_transform)
+        train_image_folder = ImageFolder_with_loading_time(root=args.trainset, transform=ra_t)
+        train_image_cache  = None
+
+    test_image_folder = ImageFolder_with_loading_time(root=args.valset, transform=basic_transform)
 
     # dataloader
     if (loader_type == 'proposed'):
-        train_loader    = DataLoaderWithCache(train_image_folder, batch_size=batch_size, shuffle=True,
-                                            num_workers=4, num_threads=8)
-        test_loader     = DataLoaderWithCache(test_image_folder, batch_size=batch_size, shuffle=True,
-                                            num_workers=4, num_threads=8)
+        train_batch_num    = int( (len(train_image_folder) + batch_size - 1) // batch_size )
+        train_dataloader   = DataLoaderWithCache(train_image_folder, batch_num=train_batch_num, shuffle=True,
+                                                  num_workers=16, num_threads=2)
+        train_cacheloader  = DataLoaderWithCache(train_image_cache, batch_num=train_batch_num)
+        train_loader       = (train_dataloader, train_cacheloader)
+
     elif (loader_type == 'default'):
-        train_loader    = torch.utils.data.DataLoader(train_image_folder, batch_size=batch_size, shuffle=True,
-                                                    num_workers=16)
-        test_loader     = torch.utils.data.DataLoader(test_image_folder, batch_size=batch_size, shuffle=True,
-                                                    num_workers=16)
+        train_loader       = torch.utils.data.DataLoader(train_image_folder, batch_size=batch_size, shuffle=True,
+                                                          num_workers=16)
+        train_batch_num    = len(train_loader)
+
+    test_loader = torch.utils.data.DataLoader(test_image_folder, batch_size=batch_size, shuffle=True, num_workers=16)
 
     # get deep learning model
     preset_model = torchvision.models.resnet18(weights=None)
@@ -144,12 +149,12 @@ if __name__ == '__main__':
 
     # train
     loss, acc, time, val_loss, val_acc, loading = utils._train_model(model, dataset=train_image_folder,
+                                                                     cache_dataset=train_image_cache, batch_num=train_batch_num,
                                                                      train_loader=train_loader, test_loader=test_loader,
                                                                      epochs=100, device=device,
                                                                      criterion=criterion, optimizer=optimizer,
                                                                      model_name=model_name, output_dir=args.output,
-                                                                     min_reuse_factor=args.min_reuse_factor,
-                                                                     evict_ratio=args.evict_ratio, criteria=args.criteria)
+                                                                     criteria=args.criteria)
 
     # save result
     result = {'train_loss':loss, 'train_accuracy':acc, 'elapsed_time':time, 'validation_loss':val_loss, 'validation_accuracy':val_acc, 'loading_time':loading}

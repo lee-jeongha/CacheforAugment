@@ -2,6 +2,9 @@ import torch
 import torchvision
 from time import time
 import numpy as np
+import itertools
+import copy
+
 #-------------------------------------------#
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -45,10 +48,9 @@ def validate_model(model, test_loader, criterion, device):
 default_transforms = torchvision.transforms.Compose(
                         [torchvision.transforms.Resize([224,224]), torchvision.transforms.ToTensor()])
 #-------------------------------------------#
-def _train_model(model, dataset, train_loader, test_loader,
-                 criterion=torch.nn.CrossEntropyLoss(), optimizer=None,
-                 epochs=100, device='cpu', model_name='alexnet', output_dir=None,
-                 min_reuse_factor=1, evict_ratio=0.2, criteria='random'):
+def _train_model(model, dataset, cache_dataset, batch_num, train_loader, test_loader,
+                 criterion=torch.nn.CrossEntropyLoss(), optimizer=None,epochs=100,
+                 device='cpu', model_name='alexnet', output_dir=None, criteria='random'):
 
     if output_dir is not None:
         log_f = open(output_dir+'/stdout.txt', 'w')
@@ -57,7 +59,10 @@ def _train_model(model, dataset, train_loader, test_loader,
     model = model.to(device)
 
     # train
-    iter_count = len(train_loader)
+    has_to_concat = False
+    if isinstance(train_loader, tuple):
+        has_to_concat = True
+    iter_count = batch_num
     loss_per_epoch, acc_per_epoch, time_per_epoch, val_loss_per_epoch, val_acc_per_epoch, loading_per_epoch = [], [], [], [], [], []
 
     # For early stopping
@@ -72,17 +77,25 @@ def _train_model(model, dataset, train_loader, test_loader,
         epo_total, epo_correct, epo_loss = 0, 0, 0
         dataload_times = []
 
-        for data in train_loader:
+        #for data in train_loader:
+        for data in itertools.zip_longest(*train_loader):
+            # concat `ImageFolder` data samples and `CachedDataset` samples
+            if has_to_concat:
+                if data[1] is None:
+                    data = data[0]
+                else:
+                    data = tuple(torch.cat(d) for d in zip(*data))
+
             model.train()
 
             iter_size, iter_correct, iter_loss, losses, iter_time = train_one_batch(data, model, criterion, optimizer, device)
-            idx, sample, target, _ = data
 
+            idx, sample, target, _ = data
             try:
                 if criteria == 'random':
-                    dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
+                    cache_dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
                 elif criteria == 'loss_sample':
-                    dataset.cache_batch(idx, sample, target, losses)
+                    cache_dataset.cache_batch(idx, sample, target, losses)
             except AttributeError:
                 pass
 
@@ -104,8 +117,13 @@ def _train_model(model, dataset, train_loader, test_loader,
                 total, correct, train_loss, partition = 0, 0, 0, 0
 
         try:
-            dataset.make_evict_candidates(min_reuse_factor=min_reuse_factor, evict_ratio=evict_ratio)
-        except AttributeError:
+            # update index in cache_dataset
+            cache_dataset.make_evict_candidates()
+            # update samples in dataset
+            dataset.imgs = copy.deepcopy(dataset.samples_dict)
+            for index in sorted(cache_dataset.sample_info.keys(), reverse=True):
+                del dataset.imgs[index]
+        except:
             pass
 
         end_epoch = time()
