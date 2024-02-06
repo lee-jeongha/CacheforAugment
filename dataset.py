@@ -1,45 +1,16 @@
 import torch, torchvision
+from torchvision.datasets.folder import *
 from tensordict import MemoryMappedTensor
 from tensordict import TensorDict
 from tensordict.prototype import tensorclass
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
-import numpy as np
 from typing import Any, Callable, Optional, Tuple, Sequence
-from PIL import Image
 import heapq, gc, time, copy
 from heapq import _heapreplace_max, _heapify_max, _siftup_max, _siftdown_max
 import multiprocessing as mp
 from operator import itemgetter
 import tqdm
-
-IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".ppm", ".bmp", ".pgm", ".tif", ".tiff", ".webp")
-
-def pil_loader(path: str) -> Image.Image:
-    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
-    with open(path, "rb") as f:
-        img = Image.open(f)
-        return img.convert("RGB")
-
-
-# TODO: specify the return type
-def accimage_loader(path: str) -> Any:
-    import accimage
-
-    try:
-        return accimage.Image(path)
-    except OSError:
-        # Potentially a decoding problem, fall back to PIL.Image
-        return pil_loader(path)
-
-
-def default_loader(path: str) -> Any:
-    from torchvision import get_image_backend
-
-    if get_image_backend() == "accimage":
-        return accimage_loader(path)
-    else:
-        return pil_loader(path)
 
 # ImageFolder
 class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
@@ -288,7 +259,6 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                 pos = e[1]
                 self.temp_samples[pos] = c
             heapq.heapify(self.temp_samples)
-
             del evict_candidates
 
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
