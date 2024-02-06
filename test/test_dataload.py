@@ -15,8 +15,8 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
 
     batch_size = 256
     batch_num = int( (len(mvif)+ batch_size - 1) // batch_size )
-    ifdl = DataLoaderWithCache(mvif, batch_num=batch_num, num_workers=16, num_threads=2)
-    cddl = DataLoaderWithCache(mvcd, batch_num=batch_num)
+    ifdl = DataLoaderWithCache(mvif, batch_num=batch_num, shuffle=True, num_workers=16, num_threads=2)
+    cddl = DataLoaderWithCache(mvcd, batch_num=batch_num, shuffle=True)
 
     dataset_samples_dict = { idx : sample for idx, sample in enumerate(mvif.samples) }
 
@@ -27,15 +27,15 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
         #print(py_multiprocessing.current_process().__dict__['_name'], py_multiprocessing.active_children())
         for (idata, cdata) in zip_longest(ifdl, cddl):
 
-            idx, data, target, _ = idata
-            if cdata is not None:
-                cidx, cdata, ctarget, _ = cdata
+            if cdata is None:
+                idx, data, target, _ = idata
+            else:
+                dataload = tuple(torch.cat(dl) for dl in zip(idata, cdata))
+                idx, data, target, _ = dataload
 
-            d, t = (data, target)
-
-            cache_start = time.time()
             if criteria == 'random':
-                mvcd.cache_batch(idx, data, target, torch.rand(len(idx)))
+                #mvcd.cache_batch(idx, data, target, torch.rand(len(idx)))
+                mvcd.cache_batch(idata[0], idata[1], idata[2], torch.rand(len(idata[0])))
             else:
                 raise Exception("criteria has to be 'random'")
                 #mvcd.cache_batch(idx, data, target, loss)
