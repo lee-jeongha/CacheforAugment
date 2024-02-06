@@ -144,11 +144,6 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         self.sample_info[index][1].value += 1
 
-        # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
-        #sample = torchvision.transforms.functional.to_pil_image(sample)
-        sample = ((0.5*sample+0.5)*255).to(torch.uint8)
-        #import matplotlib.pyplot as plt;  plt.imshow(np.asarray(sample).T);  plt.savefig(str(index), dpi=300);  exit()
-
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
@@ -186,11 +181,6 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         datas = []
         for i, (index, sample, target) in enumerate(zip(indices, samples, targets)):
             self.sample_info[index][1].value += 1
-
-            # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
-            #sample = torchvision.transforms.functional.to_pil_image(sample)
-            sample = ((0.5*sample+0.5)*255).to(torch.uint8)
-            #import matplotlib.pyplot as plt;  plt.imshow(np.asarray(sample).T);  plt.savefig(str(index), dpi=300);  exit()
 
             if self.transform is not None:
                 sample = self.transform(sample)

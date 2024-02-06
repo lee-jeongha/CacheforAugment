@@ -23,11 +23,16 @@ class AutoAugment_with_p(transforms.AutoAugment):
                  policy = AutoAugmentPolicy.IMAGENET,
                  interpolation: Union[InterpolationMode, int] = InterpolationMode.NEAREST,
                  fill: Union[_FillType, Dict[Union[Type, str], _FillType]] = None,
-                 p: float = 1.0):
+                 p: float = 1.0,
+                 pre_transforms = None):
         super().__init__(policy=policy, interpolation=interpolation, fill=fill)
         self.p = p
+        self.pre_transforms = pre_transforms
 
     def forward(self, *inputs):
+        if self.pre_transforms:
+            inputs = self.pre_transforms(inputs)
+
         flat_inputs_with_spec, image_or_video = self._flatten_and_extract_image_or_video(inputs)
         height, width = get_size(image_or_video)
 
@@ -77,13 +82,18 @@ class RandAugment_with_p(transforms.RandAugment):
         num_magnitude_bins: int = 31,
         interpolation: Union[InterpolationMode, int] = InterpolationMode.NEAREST,
         fill: Union[_FillType, Dict[Union[Type, str], _FillType]] = None,
-        p: float = 1.0
+        p: float = 1.0,
+        pre_transforms = None
     ) -> None:
         super().__init__(num_ops=num_ops, magnitude=magnitude, num_magnitude_bins=num_magnitude_bins,
                          interpolation=interpolation, fill=fill)
         self.p = p
+        self.pre_transforms = pre_transforms
 
     def forward(self, *inputs: Any) -> Any:
+        if self.pre_transforms:
+            inputs = self.pre_transforms(inputs)
+
         flat_inputs_with_spec, image_or_video = self._flatten_and_extract_image_or_video(inputs)
         height, width = get_size(image_or_video)
 
@@ -123,19 +133,21 @@ valset_transform = transforms.Compose([
 # ------
 def autoaugment_transform(basic_transform, p=1):
     autoaugment_transform = copy.deepcopy(basic_transform)
-    transform_block = AutoAugment_with_p(policy=transforms.AutoAugmentPolicy.CIFAR10, p=p)
+    transform_block = AutoAugment_with_p(policy=transforms.AutoAugmentPolicy.CIFAR10, p=p,
+                                         pre_transforms=transforms.ToDtype(torch.uint8, scale=True))
 
-    # Add AutoAugment at first
-    autoaugment_transform.transforms.insert(0, transform_block)
-    
+    # Add AutoAugment at last
+    autoaugment_transform.transforms.append(transform_block)
+
     return autoaugment_transform, transform_block
 
 # ------
 def randaugment_transform(basic_transform, num_ops, p=1):
     randaugment_transform = copy.deepcopy(basic_transform)
-    transform_block = RandAugment_with_p(num_ops=num_ops, p=p)
+    transform_block = RandAugment_with_p(num_ops=num_ops, p=p,
+                                         pre_transforms=transforms.ToDtype(torch.uint8, scale=True))
 
     # Add RandAugment at first
-    randaugment_transform.transforms.insert(0, transform_block)
+    randaugment_transform.transforms.append(transform_block)
     
     return randaugment_transform, transform_block
