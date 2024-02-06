@@ -14,7 +14,7 @@ def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor
     batch_size = 256
     batch_num = int( (len(mvif)+ batch_size - 1) // batch_size )
     ifdl = DataLoaderWithCache(mvif, batch_num=batch_num, num_workers=16, num_threads=2)
-    cddl = DataLoaderWithCache(mvcd, batch_num=batch_num, num_workers=2)
+    cddl = DataLoaderWithCache(mvcd, batch_num=batch_num)
 
     dataset_samples_dict = { idx : sample for idx, sample in enumerate(mvif.samples) }
 

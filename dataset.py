@@ -8,6 +8,7 @@ import numpy as np
 from typing import Any, Callable, Optional, Tuple, Sequence
 from PIL import Image
 import heapq, gc, time, copy
+from heapq import _heapreplace_max, _heapify_max, _siftup_max, _siftdown_max
 import multiprocessing as mp
 from operator import itemgetter
 import tqdm
@@ -145,7 +146,7 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                                    'images': torch.empty((0, 1), dtype=torch.float16),
                                    'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
         self.sample_info = dict()       # {‘index’: (position_index, reuse_factor, -abs(loss))}
-        self.imgs = self.sample_info
+        self.imgs = copy.deepcopy(self.sample_info)
         self.temp_samples = []             # [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()   # { index }
         self.max_loss_candidates = -(10 ** 9)
@@ -174,9 +175,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
         # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
         #sample = torchvision.transforms.functional.to_pil_image(sample)
-        sample = sample.to(torch.float32)
-        target = target
-        #import matplotlib.pyplot as plt;    plt.imshow(np.asarray(sample)); plt.show(); exit()
+        sample = ((0.5*sample+0.5)*255).to(torch.uint8)
+        #import matplotlib.pyplot as plt;  plt.imshow(np.asarray(sample).T);  plt.savefig(str(index), dpi=300);  exit()
 
         if self.transform is not None:
             sample = self.transform(sample)
@@ -214,9 +214,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
 
             # TODO: if normalized_transform are applied, denormalize -> to_pil_image(0.5*img+0.5)
             #sample = torchvision.transforms.functional.to_pil_image(sample)
-            sample = samples[i].to(torch.float32)
-            target = targets[i]
-            #import matplotlib.pyplot as plt;    plt.imshow(np.asarray(sample)); plt.show(); exit()
+            sample = ((0.5*sample+0.5)*255).to(torch.uint8)
+            #import matplotlib.pyplot as plt;  plt.imshow(np.asarray(sample).T);  plt.savefig(str(index), dpi=300);  exit()
 
             if self.transform is not None:
                 sample = self.transform(sample)
@@ -242,27 +241,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
             caching_losses (List(float)): List of Negative Absolute Loss of samples
         """
 
-        for (index, sample, target, loss) in zip(caching_idx, caching_samples, caching_targets, caching_losses):
-            if (not len(self.sample_info)) and (len(self.temp_samples) < self.cache_length):
-                """
-                Case 2. On the first epoch
-                `self.samples` has not been decided
-                All data structures related to evict will be used in the same size as `self.samples`
-                """
-                # insert
-                heapq.heappush(self.temp_samples, (loss, index, sample, target))
-
-            else:
-                try:
-                    """evicted == (e_loss, e_idx, e_sample, e_target, e_reuse_factor)"""
-                    evicted = heapq.heappushpop(self.temp_samples, (loss, index, sample, target))
-                    del evicted
-                except IndexError:
-                    print("error on cache_batch: temp_sample is empty")
-                    return
-
-        '''cache_data = list(zip(caching_losses, caching_idx, caching_samples, caching_targets))
-        heapq.heapify(cache_data)
+        cache_data = list(zip(caching_losses, caching_idx, caching_samples, caching_targets))
+        cache_data = sorted(cache_data, key=itemgetter(0))
 
         if (not len(self.samples)) and (len(self.temp_samples) < self.cache_length):
             """
@@ -280,17 +260,36 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
                 del evicted
 
         else:
-            try:
-                # replace
-                for cd in cache_data:
-                    """evicted == (e_loss, e_idx, e_sample, e_target, e_reuse_factor)"""
-                    evicted = heapq.heappushpop(self.temp_samples, cd)
-                    del evicted
-            except IndexError:
-                print("error on cache_batch: temp_sample is empty")
-                return
-        #print("cache:", time.time() - start); exit()
-        del cache_data'''
+            """
+            Case 3. Replace
+            (1) updating = [-2, -2, -1, -1, 0],   current = [-4, -3, -2, 0, 0]
+                -> mask = [1, 1, 1, 0, 0]
+                -> replace_num = 3
+                -> current[3:] + updating[-3:] = [0, 0] + [-1, -1, 0]
+            (2) updating = [-5, -4, -3, -2, -1],  current = [-4, -4, -4, -3, -3]
+                -> mask = [0, 0, 1, 1, 1]
+                -> replace_num = 3
+                -> current[3:] + updating[-3:] = [-3, -3] + [-3, -2, -1]
+            (3) updating = [-7, -4, -3, -1, 0],   current = [-15, -9, -7, -3, -1]
+                -> mask = [1, 1, 1, 1, 1]
+                -> replace_num = 5
+                -> updating[-5:] = [-7, -4, -3, -1, 0]
+                * optimal = [-3, -3, -1, -1, 0]
+            """
+            evict_candidates = self.nsmallest_with_index(len(caching_idx), self.temp_samples)
+            # self.temp_samples = [(loss, index, sample, target)]  for samples in current epoch
+            #                   = [(loss, index)]                  for self.idx_to_be_dismissed
+            # evict_candidates  = [(elem_in_`self.temp_samples`, idx_from_`self.temp_samples`)]
+
+            mask = [1 if c[0] > e[0][0] else 0 for (c, e) in zip(cache_data, evict_candidates)]
+
+            replace_num = mask.count(1)
+            for (c, e) in zip(cache_data[-replace_num:], evict_candidates[:replace_num]):
+                pos = e[1]
+                self.temp_samples[pos] = c
+            heapq.heapify(self.temp_samples)
+
+            del evict_candidates
 
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
         """
@@ -340,6 +339,8 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         4. `update_imgs_path_list()`
         """
         self.cache_temp_samples()
+
+        self.imgs = copy.deepcopy(list(self.sample_info.keys()))
 
         scan_evict_indices_heap = []    # [ (reuse_factor, -abs(loss), index) ]
         for k, v in self.sample_info.items():    # {‘index’: (position_index, reuse_factor, -abs(loss))}
@@ -401,3 +402,71 @@ class CachedDataset(torchvision.datasets.DatasetFolder):
         del self.temp_samples[:], temp_samples_dict
 
         return
+
+    def nsmallest_with_index(self, n, iterable, key=None):
+        """Find the n smallest elements in a dataset.
+
+        Equivalent to:  sorted(iterable, key=key)[:n]
+
+        Source: https://github.com/python/cpython/blob/3.12/Lib/heapq.py
+        """
+
+        # Short-cut for n==1 is to use min()
+        if n == 1:
+            it = iter(iterable)
+            sentinel = object()
+            #result = min(it, default=sentinel, key=key)
+            if key is None:
+                it = [(None, elem, idx) for idx, elem in enumerate(it)]
+            else:
+                it = [(key(elem), elem, idx) for idx, elem in enumerate(it)]
+            result = min(it, default=sentinel, key=key)
+            return [] if result is sentinel else [result[1:]]
+
+        # When n>=size, it's faster to use sorted()
+        try:
+            size = len(iterable)
+        except (TypeError, AttributeError):
+            pass
+        else:
+            if n >= size:
+                it = [(elem, idx) for idx, elem in enumerate(iter(iterable))]
+                return sorted(it, key=key)[:n]
+
+        # When key is none, use simpler decoration
+        if key is None:
+            it = iter(iterable)
+            # put the range(n) first so that zip() doesn't
+            # consume one too many elements from the iterator
+            result = [(elem, i, i) for i, elem in zip(range(n), it)]
+            if not result:
+                return result
+            _heapify_max(result)
+            top = result[0][0]
+            order = n
+            _heapreplace = _heapreplace_max
+            for idx, elem in enumerate(it):
+                if elem < top:
+                    _heapreplace(result, (elem, order, n+idx))
+                    top, _order, _idx = result[0]
+                    order += 1
+            result.sort()
+            return [(elem, idx) for (elem, order, idx) in result]
+
+        # General case, slowest method
+        it = iter(iterable)
+        result = [(key(elem), i, elem, i) for i, elem in zip(range(n), it)]
+        if not result:
+            return result
+        _heapify_max(result)
+        top = result[0][0]
+        order = n
+        _heapreplace = _heapreplace_max
+        for idx, elem in enumerate(it):
+            k = key(elem)
+            if k < top:
+                _heapreplace(result, (k, order, elem, n+idx))
+                top, _order, _elem, _idx = result[0]
+                order += 1
+        result.sort()
+        return [(elem, idx) for (k, order, elem, idx) in result]
