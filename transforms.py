@@ -149,7 +149,7 @@ def randaugment_transform(basic_transform, num_ops, p=1):
                                                              pre_transforms=transforms.ToDtype(torch.uint8, scale=True)),
                                           transforms.ToDtype(torch.float32, scale=True)])
 
-    # Add RandAugment at first
+    # Add RandAugment at last
     randaugment_transform.transforms.append(transform_block)
-    
+
     return randaugment_transform, transform_block
