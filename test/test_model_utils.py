@@ -2,7 +2,6 @@ import torch
 import torchvision
 from time import time
 import numpy as np
-import itertools
 import copy
 
 #-------------------------------------------#
@@ -48,9 +47,9 @@ def validate_model(model, test_loader, criterion, device):
 default_transforms = torchvision.transforms.Compose(
                         [torchvision.transforms.Resize([224,224]), torchvision.transforms.ToTensor()])
 #-------------------------------------------#
-def _train_model(model, dataset, cache_dataset, batch_num, train_loader, test_loader,
-                 criterion=torch.nn.CrossEntropyLoss(), optimizer=None,epochs=100,
-                 device='cpu', model_name='alexnet', output_dir=None, criteria='random'):
+def _train_model(model, dataset, train_loader, test_loader, epochs=100, device='cpu',
+                 criterion=torch.nn.CrossEntropyLoss(), optimizer=None,
+                 model_name='alexnet', output_dir=None, criteria='random'):
 
     if output_dir is not None:
         log_f = open(output_dir+'/stdout.txt', 'w')
@@ -59,10 +58,7 @@ def _train_model(model, dataset, cache_dataset, batch_num, train_loader, test_lo
     model = model.to(device)
 
     # train
-    has_to_concat = False
-    if isinstance(train_loader, tuple):
-        has_to_concat = True
-    iter_count = batch_num
+    iter_count = len(train_loader)
     loss_per_epoch, acc_per_epoch, time_per_epoch, val_loss_per_epoch, val_acc_per_epoch, loading_per_epoch = [], [], [], [], [], []
 
     # For early stopping
@@ -77,15 +73,7 @@ def _train_model(model, dataset, cache_dataset, batch_num, train_loader, test_lo
         epo_total, epo_correct, epo_loss = 0, 0, 0
         dataload_times = []
 
-        #for data in train_loader:
-        for data in itertools.zip_longest(*train_loader):
-            # concat `ImageFolder` data samples and `CachedDataset` samples
-            if has_to_concat:
-                if data[1] is None:
-                    data = data[0]
-                else:
-                    data = tuple(torch.cat(d) for d in zip(*data))
-
+        for data in train_loader:
             model.train()
 
             iter_size, iter_correct, iter_loss, losses, iter_time = train_one_batch(data, model, criterion, optimizer, device)
