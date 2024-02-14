@@ -39,19 +39,7 @@ from torch.utils.data import _utils
 
 from torch.utils.data.dataloader import _InfiniteConstantSampler, T_co, _collate_fn_t, _worker_init_fn_t, _share_dist_seed, _sharding_worker_init_fn
 from torch.utils.data.dataloader import _BaseDataLoaderIter, _SingleProcessDataLoaderIter, _MultiProcessingDataLoaderIter, _DatasetKind
-from fetch import _MultithreadIterableDatasetFetcher, _MultithreadMapDatasetFetcher
 import worker
-
-class _MultithreadDatasetKind():    # torch.utils.data._DatasetKind
-    Map = 0
-    Iterable = 1
-
-    @staticmethod
-    def create_fetcher(kind, dataset, auto_collation, collate_fn, drop_last, num_threads: Optional[int] = None):
-        if kind == _MultithreadDatasetKind.Map:
-            return _MultithreadMapDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, num_threads)
-        else:
-            return _MultithreadIterableDatasetFetcher(dataset, auto_collation, collate_fn, drop_last, num_threads)
 
 class BundleDataLoader(torch.utils.data.DataLoader):
     dataset: Dataset[T_co]
@@ -285,10 +273,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         # samplers first, so that they don't learn that this combo doesn't work
         # after spending time fixing the custom sampler errors.
         if isinstance(dataset, IterableDataset):
-            if self.num_threads:
-                self._dataset_kind = _MultithreadDatasetKind.Iterable
-            else:
-                self._dataset_kind = _DatasetKind.Iterable
+            self._dataset_kind = _DatasetKind.Iterable
 
             if isinstance(dataset, IterDataPipe):
                 if shuffle is not None:
@@ -311,10 +296,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                     "batch_sampler option, but got batch_sampler={}".format(batch_sampler))
         else:
             shuffle = bool(shuffle)
-            if self.num_threads:
-                self._dataset_kind = _MultithreadDatasetKind.Map
-            else:
-                self._dataset_kind = _DatasetKind.Map
+            self._dataset_kind = _DatasetKind.Map
 
         if sampler is not None and shuffle:
             raise ValueError('sampler option is mutually exclusive with '
@@ -367,8 +349,8 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
     @property
     def _file_sampler(self):
         # initialize _file_sampler
-        if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
-            # See NOTE [ Custom Samplers and IterableDataset ]
+        if self._dataset_kind == _DatasetKind.Iterable:
+                # See NOTE [ Custom Samplers and IterableDataset ]
             return _InfiniteConstantSampler()
         else:  # map-style
             if self.shuffle:
@@ -440,7 +422,7 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             return self._cache_sampler
 
     def __len__(self) -> int:
-        if (self._dataset_kind == _DatasetKind.Iterable) or (self._dataset_kind == _MultithreadDatasetKind.Iterable):
+        if self._dataset_kind == _DatasetKind.Iterable:
             # NOTE [ IterableDataset and __len__ ]
             #
             # For `IterableDataset`, `__len__` could be inaccurate when one naively
@@ -495,12 +477,8 @@ class _SingleProcessDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter, _Singl
     def __init__(self, loader):
         super(_SingleProcessDataLoaderWithCacheIter, self).__init__(loader)
 
-        if loader.num_threads:
-            self._dataset_fetcher = _MultithreadDatasetKind.create_fetcher(
-                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last, self._num_threads)
-        else:
-            self._dataset_fetcher = _DatasetKind.create_fetcher(
-                self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last)
+        self._dataset_fetcher = _DatasetKind.create_fetcher(
+            self._dataset_kind, self._dataset, self._auto_collation, self._collate_fn, self._drop_last)
 
     def _next_data(self):
         index = self._next_index()  # may raise StopIteration
@@ -755,7 +733,7 @@ class _MultiProcessingDataLoaderWithCacheIter(_BaseDataLoaderWithCacheIter):    
             assert not self._shutdown and self._tasks_outstanding > 0
             idx, data = self._get_data()
             self._tasks_outstanding -= 1
-            if (self._dataset_kind == _MultithreadDatasetKind.Iterable) or (self._dataset_kind == _DatasetKind.Iterable):
+            if self._dataset_kind == _DatasetKind.Iterable:
                 # Check for _IterableDatasetStopIteration
                 if isinstance(data, _utils.worker._IterableDatasetStopIteration):
                     if self._persistent_workers:
