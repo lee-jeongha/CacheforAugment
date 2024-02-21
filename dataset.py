@@ -6,7 +6,7 @@ from tensordict.prototype import tensorclass
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from typing import Any, Callable, Optional, Tuple, Sequence
-import heapq, gc, time, copy
+import os, heapq, gc, time, copy
 from heapq import _heapreplace_max, _heapify_max, _siftup_max, _siftdown_max
 import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +48,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         self.caches = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
                                   'images': torch.empty((0, 1), dtype=torch.float16),
                                   'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
-        self.cache_info = dict()          # {‘index’: (position_index, reuse_factor, -abs(loss))}
+        self.cache_info = dict()          # {'index': (position_index, reuse_factor, -abs(loss))}
         self.temp_cached = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()  # { index }
         self.max_loss_candidates = -(10 ** 9)
@@ -121,7 +121,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             imgs_path = list(map(itemgetter(0), imgs_))
 
             samples = []
-            with ThreadPoolExecutor(max_workers=100) as executor:
+            with ThreadPoolExecutor(max_workers=len(imgs_path)) as executor:
                 exes = [executor.submit(self.loader, path) for path in imgs_path]
                 samples += [exe.result() for exe in exes]
             targets = list(map(itemgetter(1), imgs_))
@@ -267,7 +267,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                 -> updating[-5:] = [-7, -4, -3, -1, 0]
                 * optimal = [-3, -3, -1, -1, 0]
             """
-            evict_candidates = self.nsmallest_with_index(len(caching_idx), self.temp_cached)
+            evict_candidates = heapq_nsmallest_with_index(len(caching_idx), self.temp_cached)
             cache_data = cache_data[:len(evict_candidates)]
             # self.temp_cached = [(loss, index, sample, target)]  for samples in current epoch
             #                   = [(loss, index)]                  for self.idx_to_be_dismissed
@@ -309,19 +309,13 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         1. Making heap by scanning all the elements in `self.cache_info`: that `reuse_factor` exceeds min value
             -> heap has (reuse_factor, loss, index) as value
         2. Extract from heap using `heapq.nsmallest(num, q)`
-        3. Remove the `reuse_factor` from the heap element tuple
-        4. `update_imgs_path_list()`
+        3. update `self.imgs_dict`
         """
         if (not len(self.caches)) and len(self.temp_cached):
             self.cache_from_temp_cached()
 
-        # fix imgs_dict
-        self.imgs_dict = copy.deepcopy(self.samples_dict)
-        for index in sorted(self.cache_info.keys(), reverse=True):
-            del self.imgs_dict[index]
-
         scan_evict_indices_heap = []            # [ (reuse_factor, -abs(loss), index) ]
-        for k, v in self.cache_info.items():    # {‘index’: (position_index, reuse_factor, -abs(loss))}
+        for k, v in self.cache_info.items():    # {'index': (position_index, reuse_factor, -abs(loss))}
             if (v[1].value >= self.min_reuse_factor):
                 heapq.heappush(scan_evict_indices_heap, (v[1].value, v[2], k))
         evict_candidates_heap = heapq.nsmallest(self.evict_length, scan_evict_indices_heap)
@@ -329,6 +323,11 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         del self.temp_cached[:]
         self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
         self.max_loss_candidates = evict_candidates_heap[0][1] if len(evict_candidates_heap) > 0 else -(10 ** 9)
+
+        # fix imgs_dict
+        self.imgs_dict = copy.deepcopy(self.samples_dict)
+        for index in sorted(self.cache_info.keys(), reverse=True):
+            del self.imgs_dict[index]
 
         del scan_evict_indices_heap, evict_candidates_heap
         gc.collect()    # invoke garbage collector manually
@@ -345,59 +344,43 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             self.cache_info[index] = (pos_idx, mp.Value('i', 0), temp_cached_dict[index][0])
         return
 
-    def nsmallest_with_index(self, n, iterable, key=None):
-        """Find the n smallest elements in a dataset.
+# Find n smallest elements and thier location from heapq
+def heapq_nsmallest_with_index(n, iterable, key=None):
+    """Find the n smallest elements in a dataset.
 
-        Equivalent to:  sorted(iterable, key=key)[:n]
+    Equivalent to:  sorted(iterable, key=key)[:n]
 
-        Source: https://github.com/python/cpython/blob/3.12/Lib/heapq.py
-        """
+    Source: https://github.com/python/cpython/blob/3.12/Lib/heapq.py
+    """
 
-        # Short-cut for n==1 is to use min()
-        if n == 1:
-            it = iter(iterable)
-            sentinel = object()
-            #result = min(it, default=sentinel, key=key)
-            if key is None:
-                it = [(None, elem, idx) for idx, elem in enumerate(it)]
-            else:
-                it = [(key(elem), elem, idx) for idx, elem in enumerate(it)]
-            result = min(it, default=sentinel, key=key)
-            return [] if result is sentinel else [result[1:]]
-
-        # When n>=size, it's faster to use sorted()
-        try:
-            size = len(iterable)
-        except (TypeError, AttributeError):
-            pass
-        else:
-            if n >= size:
-                it = [(elem, idx) for idx, elem in enumerate(iter(iterable))]
-                return sorted(it, key=key)[:n]
-
-        # When key is none, use simpler decoration
-        if key is None:
-            it = iter(iterable)
-            # put the range(n) first so that zip() doesn't
-            # consume one too many elements from the iterator
-            result = [(elem, i, i) for i, elem in zip(range(n), it)]
-            if not result:
-                return result
-            _heapify_max(result)
-            top = result[0][0]
-            order = n
-            _heapreplace = _heapreplace_max
-            for idx, elem in enumerate(it):
-                if elem < top:
-                    _heapreplace(result, (elem, order, n+idx))
-                    top, _order, _idx = result[0]
-                    order += 1
-            result.sort()
-            return [(elem, idx) for (elem, order, idx) in result]
-
-        # General case, slowest method
+    # Short-cut for n==1 is to use min()
+    if n == 1:
         it = iter(iterable)
-        result = [(key(elem), i, elem, i) for i, elem in zip(range(n), it)]
+        sentinel = object()
+        #result = min(it, default=sentinel, key=key)
+        if key is None:
+            it = [(None, elem, idx) for idx, elem in enumerate(it)]
+        else:
+            it = [(key(elem), elem, idx) for idx, elem in enumerate(it)]
+        result = min(it, default=sentinel, key=key)
+        return [] if result is sentinel else [result[1:]]
+
+    # When n>=size, it's faster to use sorted()
+    try:
+        size = len(iterable)
+    except (TypeError, AttributeError):
+        pass
+    else:
+        if n >= size:
+            it = [(elem, idx) for idx, elem in enumerate(iter(iterable))]
+            return sorted(it, key=key)[:n]
+
+    # When key is none, use simpler decoration
+    if key is None:
+        it = iter(iterable)
+        # put the range(n) first so that zip() doesn't
+        # consume one too many elements from the iterator
+        result = [(elem, i, i) for i, elem in zip(range(n), it)]
         if not result:
             return result
         _heapify_max(result)
@@ -405,13 +388,30 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         order = n
         _heapreplace = _heapreplace_max
         for idx, elem in enumerate(it):
-            k = key(elem)
-            if k < top:
-                _heapreplace(result, (k, order, elem, n+idx))
-                top, _order, _elem, _idx = result[0]
+            if elem < top:
+                _heapreplace(result, (elem, order, n+idx))
+                top, _order, _idx = result[0]
                 order += 1
         result.sort()
-        return [(elem, idx) for (k, order, elem, idx) in result]
+        return [(elem, idx) for (elem, order, idx) in result]
+
+    # General case, slowest method
+    it = iter(iterable)
+    result = [(key(elem), i, elem, i) for i, elem in zip(range(n), it)]
+    if not result:
+        return result
+    _heapify_max(result)
+    top = result[0][0]
+    order = n
+    _heapreplace = _heapreplace_max
+    for idx, elem in enumerate(it):
+        k = key(elem)
+        if k < top:
+            _heapreplace(result, (k, order, elem, n+idx))
+            top, _order, _elem, _idx = result[0]
+            order += 1
+    result.sort()
+    return [(elem, idx) for (k, order, elem, idx) in result]
 
 # Tensorclass
 @tensorclass
@@ -421,7 +421,9 @@ class MemMapData:
     targets: torch.Tensor
 
     @classmethod
-    def from_dataset(cls, cache_sample, batch_size, num_workers):
+    def from_dataset(cls, cache_sample, batch_size, num_workers=4):
+        NUM_WORKERS = int(os.environ.get("NUM_WORKERS", str(num_workers)))
+
         data = cls(
             indices=MemoryMappedTensor.empty((len(cache_sample),), dtype=torch.int64),
             images=MemoryMappedTensor.empty(

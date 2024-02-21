@@ -87,7 +87,7 @@ if __name__ == '__main__':
                         nargs='?', default=None, help='validationset path')
     parser.add_argument("--output", "-o", metavar='O', type=str,
                         nargs='?', default='./Imagenet2012', help='output directory path')
-    parser.add_argument("--criteria", "-c", metavar='C', type=str, choices=['random', 'loss_sample'],
+    parser.add_argument("--criteria", "-c", metavar='C', type=str, choices=['default', 'random', 'loss_sample'],
                         nargs='?', default='random', help='choose caching criteria. random or loss')
     parser.add_argument("--num_ops", "-n", metavar='N', type=int, nargs='?', default=1, help='number of augmentation block')
     parser.add_argument("--cache_ratio", "-r", metavar='R', type=float, nargs='?', default=0.05, help='')
@@ -101,7 +101,7 @@ if __name__ == '__main__':
     ra_t, _     = autoaugment_transform(basic_transform=basic_transform, p=args.cache_ratio)
     rr_t, _     = randaugment_transform(basic_transform=basic_transform, num_ops=args.num_ops, p=args.cache_ratio)
 
-    loader_type = 'proposed'
+    loader_type = 'default' if args.criteria == 'default' else 'proposed'
     batch_size = 256
 
     # dataset
