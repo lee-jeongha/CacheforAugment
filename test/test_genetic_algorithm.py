@@ -13,15 +13,13 @@ def evaluate(chromosome, trainset, valset, drop_cache):
     os.system(drop_cache)
     aug_ratio        = chromosome[0]
     cache_type       = chromosome[1]
-    min_reuse_factor = chromosome[2]
+    reuse_factor     = chromosome[2]
     aug_block_num    = chromosome[3]
-    evict_ratio      = chromosome[4]
 
     output = './' + '_'.join([str(c) for c in chromosome])
 
     s = subprocess.run(['python3', 'test_model_run.py', '-t', trainset, '-v', valset, '-o', output, '-c', cache_type,
-                        '-r', str(aug_ratio), '-m', str(min_reuse_factor), '-n', str(aug_block_num),
-                        '-e', str(evict_ratio)], capture_output=True)
+                        '-r', str(aug_ratio), '-f', str(reuse_factor), '-n', str(aug_block_num)], capture_output=True)
 
     obj_f = -10**9
     if s.returncode == 0:
@@ -125,23 +123,21 @@ if __name__ == "__main__":
     assert isinstance(args.passwd, str), "Please enter user password"
 
     '''
-    aug_ratio        = [0.05, 0.1, 0.15, 0.2, 0.25, 0.30]
+    aug_ratio        = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     cache_type       = ['random', 'loss_sample']
-    min_reuse_factor = [1, 2, 3, 4, 5]
+    reuse_factor     = [1, 2, 3, 4, 5]
     aug_block_num    = [1, 2, 3]
-    evict_ratio      = [0.1, 0.2, 0.3, 0.4, 0.5]
     '''
 
-    elements = [[0.05, 0.1, 0.15, 0.2, 0.25, 0.30],
+    elements = [[0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
                 ['random', 'loss_sample'],
                 [1, 2, 3, 4, 5],
-                [1, 2, 3],
-                [0.1, 0.2, 0.3, 0.4, 0.5]]
+                [1, 2, 3]]
 
     # define the total iterations
     n_iter = 5
     # define the population size
-    n_pop = 50
+    n_pop = 20
     # crossover point
     p_cross = 3
     # mutation rate

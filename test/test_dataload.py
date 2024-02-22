@@ -4,11 +4,11 @@ import os, sys, time
 
 torch.multiprocessing.set_sharing_strategy('file_system')   # OSError: [Errno 24] Too many open files
 
-def run_proposed(root, cache_ratio, transform, transform_block, min_reuse_factor, evict_ratio, criteria='random', epochs=5):
+def run_proposed(root, cache_ratio, transform, transform_block, reuse_factor, criteria='random', epochs=5):
     print("run_proposed")
 
-    ifwc = ImageFolderWithCache(root=root, transform=transform, cache_ratio=cache_ratio, evict_ratio=evict_ratio,
-                                min_reuse_factor=min_reuse_factor, extra_transform=transform_block)
+    ifwc = ImageFolderWithCache(root=root, transform=transform, cache_ratio=cache_ratio,
+                                reuse_factor=reuse_factor, extra_transform=transform_block)
     dl = DataLoaderWithCache(ifwc, batch_size=256, shuffle=True, num_workers=16)
 
     for epoch in range(epochs):
@@ -66,4 +66,4 @@ if __name__ == '__main__':
 
     run_default(root=root, transform=ra_t, epochs=epochs)
     run_proposed(root=root, cache_ratio=cache_ratio, transform=basic_transform, transform_block=a_t_b,
-                 min_reuse_factor=2, evict_ratio=0.2, criteria='random', epochs=epochs)
+                 reuse_factor=2, criteria='random', epochs=epochs)

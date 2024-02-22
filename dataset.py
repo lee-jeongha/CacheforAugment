@@ -23,8 +23,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             loader: Callable[[str], Any] = default_loader,
             is_valid_file: Optional[Callable[[str], bool]] = None,
             cache_ratio: float = None,
-            evict_ratio: float = 0.1,
-            min_reuse_factor: int = 1,
+            reuse_factor: int = 1,
             extra_transform: Optional[Callable] = None,
             extra_target_transform: Optional[Callable] = None,
     ):
@@ -40,15 +39,15 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         self.imgs_dict = copy.deepcopy(self.samples_dict)
 
         self.cache_length = int(len(self) * cache_ratio)
-        self.evict_length = int(self.cache_length * evict_ratio)
-        self.min_reuse_factor = min_reuse_factor
+        self.reuse_factor = reuse_factor
+        self.reuse_count = 0
         self.extra_transform = extra_transform
         self.extra_target_transform = extra_target_transform
 
         self.caches = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
                                   'images': torch.empty((0, 1), dtype=torch.float16),
                                   'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
-        self.cache_info = dict()          # {'index': (position_index, reuse_factor, -abs(loss))}
+        self.cache_info = dict()          # {'index': (position_index, -abs(loss))}
         self.temp_cached = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, data, target) ] -> min heap
         self.idx_to_be_dismissed = set()  # { index }
         self.max_loss_candidates = -(10 ** 9)
@@ -83,8 +82,6 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                     assert self.caches[pos_idx].indices.item() == index
                 except AssertionError:
                     print("error on __getitem__", self.caches[pos_idx].indices.item(), index)
-
-            self.cache_info[index][1].value += 1
 
             if self.extra_transform is not None:
                 sample = self.extra_transform(sample)
@@ -150,8 +147,6 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                     print("error on __getitems__:", self.samples.get_at(key='indices', idx=pos_indices), indices)
 
             for i, (index, sample, target) in enumerate(zip(cache_indices, samples, targets)):
-                self.cache_info[index][1].value += 1
-
                 if self.extra_transform is not None:
                     sample = self.extra_transform(sample)
                 if self.target_transform is not None:
@@ -196,7 +191,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         for add, rm, pos, loss in zip(add_indices, rm_indices, rm_position, add_losses):
             rm_elements = self.cache_info.pop(rm)
-            self.cache_info[add] = (pos, mp.Value('i', 0), loss)
+            self.cache_info[add] = (pos, loss)
 
         del rm_indices, rm_position, add_losses, add_indices, add_images, add_targets
 
@@ -215,11 +210,12 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         dismissed_idx = list(filter(lambda x: x in self.idx_to_be_dismissed, possibly_batched_index.tolist()))
         dismissed_info = [self.cache_info[d_idx] for d_idx in dismissed_idx]
         for (idx, info) in zip(dismissed_idx, dismissed_info):
-            heapq.heappush(self.temp_cached, (info[2], idx))
+            heapq.heappush(self.temp_cached, (info[1], idx))
 
-        if (len(self.idx_to_be_dismissed) <= 0) and (len(self.cache_info) >= self.cache_length):
+        #if (len(self.idx_to_be_dismissed) <= 0) and (len(self.cache_info) >= self.cache_length):
+        if (self.reuse_count < self.reuse_factor) and (len(self.cache_info) >= self.cache_length):
             """
-            Case 1. If the current epoch is less than `self.min_reuse_factor`
+            Case 1. If the current epoch is less than `self.reuse_factor`
             `self.idx_to_be_dismissed` might be empty.
             """
             return
@@ -314,22 +310,24 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         if (not len(self.caches)) and len(self.temp_cached):
             self.cache_from_temp_cached()
 
-        scan_evict_indices_heap = []            # [ (reuse_factor, -abs(loss), index) ]
-        for k, v in self.cache_info.items():    # {'index': (position_index, reuse_factor, -abs(loss))}
-            if (v[1].value >= self.min_reuse_factor):
-                heapq.heappush(scan_evict_indices_heap, (v[1].value, v[2], k))
-        evict_candidates_heap = heapq.nsmallest(self.evict_length, scan_evict_indices_heap)
+            self.idx_to_be_dismissed = set(self.cache_info.keys())
+            # fix imgs_dict
+            self.imgs_dict = copy.deepcopy(self.samples_dict)
+            for index in sorted(self.cache_info.keys(), reverse=True):
+                del self.imgs_dict[index]
+
+        elif self.reuse_count >= self.reuse_factor:
+            self.reuse_count = 0
+
+            self.idx_to_be_dismissed = set(self.cache_info.keys())
+            # fix imgs_dict
+            self.imgs_dict = copy.deepcopy(self.samples_dict)
+            for index in sorted(self.cache_info.keys(), reverse=True):
+                del self.imgs_dict[index]
+        else:
+            self.reuse_count += 1
 
         del self.temp_cached[:]
-        self.idx_to_be_dismissed = {i[2] for i in evict_candidates_heap}
-        self.max_loss_candidates = evict_candidates_heap[0][1] if len(evict_candidates_heap) > 0 else -(10 ** 9)
-
-        # fix imgs_dict
-        self.imgs_dict = copy.deepcopy(self.samples_dict)
-        for index in sorted(self.cache_info.keys(), reverse=True):
-            del self.imgs_dict[index]
-
-        del scan_evict_indices_heap, evict_candidates_heap
         gc.collect()    # invoke garbage collector manually
 
         return
@@ -341,7 +339,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         for pos_idx, samp_idx in enumerate(self.caches.indices):
             index = samp_idx.item()
-            self.cache_info[index] = (pos_idx, mp.Value('i', 0), temp_cached_dict[index][0])
+            self.cache_info[index] = (pos_idx, temp_cached_dict[index][0])
         return
 
 # Find n smallest elements and thier location from heapq

@@ -81,9 +81,9 @@ def _train_model(model, dataset, train_loader, test_loader, epochs=100, device='
             idx, sample, target, _ = data
             try:
                 if criteria == 'random':
-                    cache_dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
+                    dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
                 elif criteria == 'loss_sample':
-                    cache_dataset.cache_batch(idx, sample, target, losses)
+                    dataset.cache_batch(idx, sample, target, losses)
             except AttributeError:
                 pass
 
@@ -103,16 +103,6 @@ def _train_model(model, dataset, train_loader, test_loader, epochs=100, device='
                             .format(batch_count, iter_count, train_loss / total, correct / total, current - start_epoch))#, end='\r')
                 epo_total, epo_correct, epo_loss = (epo_total+total), (epo_correct+correct), (epo_loss+train_loss)
                 total, correct, train_loss, partition = 0, 0, 0, 0
-
-        try:
-            # update index in cache_dataset
-            cache_dataset.make_evict_candidates()
-            # update samples in dataset
-            dataset.imgs = copy.deepcopy(dataset.samples_dict)
-            for index in sorted(cache_dataset.sample_info.keys(), reverse=True):
-                del dataset.imgs[index]
-        except:
-            pass
 
         end_epoch = time()
 

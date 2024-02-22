@@ -2,7 +2,7 @@ import torch, torchvision
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-import os, sys, argparse
+import os, sys, argparse, time
 import test_model_utils as utils
 
 class ImageFolder_with_loading_time(torchvision.datasets.ImageFolder):
@@ -47,8 +47,8 @@ def plot_result(loss, acc, time, val_loss, val_acc, model_name, output_dir=None)
     ax[1, 0].set_ylabel('Train Loss')
     ax[1, 1].set_ylabel('Train Accuracy')
 
-    ax[0, 0].legend();
-    ax[0, 1].legend();
+    ax[0, 0].legend()
+    ax[0, 1].legend()
     fig.suptitle(model_name)
 
     # plt.show()
@@ -91,8 +91,7 @@ if __name__ == '__main__':
                         nargs='?', default='random', help='choose caching criteria. random or loss')
     parser.add_argument("--num_ops", "-n", metavar='N', type=int, nargs='?', default=1, help='number of augmentation block')
     parser.add_argument("--cache_ratio", "-r", metavar='R', type=float, nargs='?', default=0.05, help='')
-    parser.add_argument("--evict_ratio", "-e", metavar='E', type=float, nargs='?', default=0.1, help='')
-    parser.add_argument("--min_reuse_factor", "-m", metavar='M', type=int, nargs='?', default=1, help='number of reuse')
+    parser.add_argument("--reuse_factor", "-f", metavar='F', type=int, nargs='?', default=1, help='number of reuse')
     parser.add_argument("--need_split", "-s", action="store_true", help='need to split dataset into train_set / test_set')
     args = parser.parse_args()
 
@@ -107,8 +106,8 @@ if __name__ == '__main__':
     # dataset
     if (loader_type == 'proposed'):
         train_image_folder  = ImageFolderWithCache(root=args.trainset, transform=basic_transform,
-                                                   cache_ratio=args.cache_ratio, evict_ratio=args.evict_ratio,
-                                                   min_reuse_factor=args.min_reuse_factor, extra_transform=r_t_b)
+                                                   cache_ratio=args.cache_ratio, reuse_factor=args.reuse_factor,
+                                                   extra_transform=r_t_b)
         test_image_folder   = ImageFolderWithCache(root=args.valset, cache_ratio=args.cache_ratio,
                                                    transform=basic_transform)
     elif (loader_type == 'default'):
