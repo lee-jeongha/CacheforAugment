@@ -18,7 +18,7 @@ def run_proposed(root, cache_ratio, transform, transform_block, reuse_factor, cr
             idx, data, target, _ = data
 
             if criteria == 'random':
-                ifwc.cache_batch(idx, data, target, torch.rand(len(idx)))
+                ifwc.cache_batch(idx, data, target, torch.ones(len(idx)))
             else:
                 raise Exception("criteria has to be 'random'")
                 #ifwc.cache_batch(idx, data, target, loss)

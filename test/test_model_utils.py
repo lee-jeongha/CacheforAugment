@@ -81,7 +81,7 @@ def _train_model(model, dataset, train_loader, test_loader, epochs=100, device='
             idx, sample, target, _ = data
             try:
                 if criteria == 'random':
-                    dataset.cache_batch(idx, sample, target, torch.rand(len(idx)))
+                    dataset.cache_batch(idx, sample, target, torch.ones(len(idx)))
                 elif criteria == 'loss_sample':
                     dataset.cache_batch(idx, sample, target, losses)
             except AttributeError:

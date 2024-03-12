@@ -269,7 +269,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             #                   = [(loss, index)]                  for self.idx_to_be_dismissed
             # evict_candidates  = [(elem_in_`self.temp_cached`, idx_from_`self.temp_cached`)]
 
-            mask = [1 if c[0] > e[0][0] else 0 for (c, e) in zip(cache_data, evict_candidates)]
+            mask = [1 if c[0] >= e[0][0] else 0 for (c, e) in zip(cache_data, evict_candidates)]
             replace_num = mask.count(1)
 
             if (not len(self.caches)) or (not replace_num):
