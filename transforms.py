@@ -1,5 +1,6 @@
 import torch
-from typing import Dict, Type, Union, Any
+from torch import Tensor
+from typing import Dict, Tuple, Type, Union, Any
 import copy
 
 from torchvision.transforms import v2 as transforms
@@ -89,6 +90,25 @@ class RandAugment_with_p(transforms.RandAugment):
                          interpolation=interpolation, fill=fill)
         self.p = p
         self.pre_transforms = pre_transforms
+
+    def _augmentation_space(self, num_bins: int, image_size: Tuple[int, int]) -> Dict[str, Tuple[Tensor, bool]]:
+        return {
+            # op_name: (magnitudes, signed)
+            #"Identity": (torch.tensor(0.0), False),
+            "ShearX": (torch.linspace(0.0, 0.3, num_bins), True),
+            "ShearY": (torch.linspace(0.0, 0.3, num_bins), True),
+            "TranslateX": (torch.linspace(0.0, 150.0 / 331.0 * image_size[1], num_bins), True),
+            "TranslateY": (torch.linspace(0.0, 150.0 / 331.0 * image_size[0], num_bins), True),
+            "Rotate": (torch.linspace(0.0, 30.0, num_bins), True),
+            "Brightness": (torch.linspace(0.0, 0.9, num_bins), True),
+            "Color": (torch.linspace(0.0, 0.9, num_bins), True),
+            "Contrast": (torch.linspace(0.0, 0.9, num_bins), True),
+            "Sharpness": (torch.linspace(0.0, 0.9, num_bins), True),
+            "Posterize": (8 - (torch.arange(num_bins) / ((num_bins - 1) / 4)).round().int(), False),
+            "Solarize": (torch.linspace(255.0, 0.0, num_bins), False),
+            "AutoContrast": (torch.tensor(0.0), False),
+            "Equalize": (torch.tensor(0.0), False),
+        }
 
     def forward(self, *inputs: Any) -> Any:
         if self.pre_transforms:
