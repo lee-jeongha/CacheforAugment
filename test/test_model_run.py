@@ -56,8 +56,14 @@ def plot_result(loss, acc, time, val_loss, val_acc, model_name, output_dir=None)
 
 def make_model(model, num_classes):
     # change the output layer to num_classes
-    num_ftrs = model.fc.in_features
-    model.fc = torch.nn.Linear(num_ftrs, num_classes)
+    names = list(model._modules.keys())
+
+    if isinstance(model._modules[names[-1]], torch.nn.Sequential):
+        num_ftrs = model._modules[names[-1]][-1].in_features
+        model._modules[names[-1]][-1] = torch.nn.Linear(num_ftrs, num_classes)
+    else:
+        num_ftrs = model._modules[names[-1]].in_features
+        model._modules[names[-1]] = torch.nn.Linear(num_ftrs, num_classes)
 
     return model
 

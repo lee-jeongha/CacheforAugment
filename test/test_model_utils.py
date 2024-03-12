@@ -141,7 +141,7 @@ def _train_model(model, dataset, train_loader, test_loader, epochs=100, device='
             best_loss = val_loss
             patience_check = 0
             torch.save(model.state_dict(), output_dir+"/model-train-"+str(model_name)+"-{}.ckpt".format(epoch))'''
-        torch.save(model.state_dict(), output_dir+"/model-train-"+str(model_name)+"-{}.ckpt".format(epoch))
+        #torch.save(model.state_dict(), output_dir+"/model-train-"+str(model_name)+"-{}.ckpt".format(epoch))
 
     log_f.close()
 
