@@ -12,6 +12,7 @@ import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
 from operator import itemgetter
 import tqdm
+from transforms import transform_for_cache
 
 # ImageFolder
 class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
@@ -45,7 +46,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         self.extra_target_transform = extra_target_transform
 
         self.caches = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
-                                  'images': torch.empty((0, 1), dtype=torch.float16),
+                                  'images': torch.empty((0, 1), dtype=torch.uint8),
                                   'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
         self.cache_info = dict()          # {'index': (position_index, -abs(loss))}
         self.temp_cached = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, data, target) ] -> min heap
@@ -178,7 +179,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         condi = torch.mul(idx_condi, loss_condi)
 
         caching_idx = possibly_batched_index[condi == 1].tolist()
-        caching_samples = samples[condi == 1].to(torch.float16)
+        caching_samples = transform_for_cache(samples[condi == 1])    # samples[condi == 1].to(torch.float16)
         caching_targets = targets[condi == 1].tolist()
         caching_losses = neg_abs_losses[condi == 1].tolist()
 
@@ -429,7 +430,7 @@ class MemMapData:
                     len(cache_sample),
                     *cache_sample[next(iter(cache_sample))][2].squeeze().shape,
                 ),
-                dtype=torch.float16,
+                dtype=torch.uint8,
             ),
             targets=MemoryMappedTensor.empty((len(cache_sample),), dtype=torch.int64),
             batch_size=[len(cache_sample)],

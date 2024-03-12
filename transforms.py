@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from typing import Dict, Tuple, Type, Union, Any
+from typing import Dict, Tuple, Type, Union, Any, Sequence
 import copy
 
 from torchvision.transforms import v2 as transforms
@@ -136,25 +136,74 @@ class RandAugment_with_p(transforms.RandAugment):
         return self._unflatten_and_insert_image_or_video(flat_inputs_with_spec, image_or_video)
 
 # ------
+class Inverse_Normalize(transforms.Normalize):
+    def __init__(self, mean: Sequence[float], std: Sequence[float], inplace: bool = False):
+        inv_mean = list(-m / s for m, s in zip(mean, std))
+        inv_std = list(1.0 / s for s in std)
+
+        super().__init__(mean=inv_mean, std=inv_std, inplace=inplace)
+
+class Normalize_Batch:
+    """original sorce code: https://github.com/GabPrato/batch-transforms/blob/master/batch_transforms.py
+    Applies the :class:`~torchvision.transforms.Normalize` transform to a batch of images.
+
+    .. note::
+        This transform acts out of place by default, i.e., it does not mutate the input tensor.
+
+    Args:
+        mean (sequence): Sequence of means for each channel.
+        std (sequence): Sequence of standard deviations for each channel.
+        inplace(bool,optional): Bool to make this operation in-place.
+        dtype (torch.dtype,optional): The data type of tensors to which the transform will be applied.
+        device (torch.device,optional): The device of tensors to which the transform will be applied.
+    """
+
+    def __init__(self, mean, std, inplace=False, dtype=torch.float, device='cpu'):
+        self.mean = torch.as_tensor(mean, dtype=dtype, device=device)#.view(1, -1, 1, 1)
+        self.std = torch.as_tensor(std, dtype=dtype, device=device)#.view(1, -1, 1, 1)
+        self.inplace = inplace
+
+    def __call__(self, tensor):
+        """
+        Args:
+            tensor (Tensor): Tensor of size (N, C, H, W) to be normalized.
+
+        Returns:
+            Tensor: Normalized Tensor.
+        """
+        if not self.inplace:
+            tensor = tensor.clone()
+
+        #tensor.sub_(self.mean).div_(self.std)
+        tensor = (tensor - self.mean) / self.std
+        return tensor
+
+# ------
 basic_transform = transforms.Compose([
-  transforms.Resize((224,224)),   #transforms.RandomCrop(224, padding=4),
-  #transforms.RandomHorizontalFlip(),
-  transforms.PILToTensor(), #transforms.ToTensor(),
-  transforms.ToDtype(torch.float32, scale=True),
-  transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    transforms.Resize((224,224)),   #transforms.RandomCrop(224, padding=4),
+    #transforms.RandomHorizontalFlip(),
+    transforms.PILToTensor(), #transforms.ToTensor(),
+    transforms.ToDtype(torch.float32, scale=True),
+    #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
 ])
 
 valset_transform = transforms.Compose([
-  transforms.Resize((224,224)),
-  transforms.PILToTensor(),
-  transforms.ToDtype(torch.float32, scale=True),
+    transforms.Resize((224,224)),
+    transforms.PILToTensor(),
+    transforms.ToDtype(torch.float32, scale=True),
+])
+
+transform_for_cache = transforms.Compose([
+    #Inverse_Normalize((0.5, 0.5, 0.5),(0.5, 0.5, 0.5)),
+    transforms.ToDtype(torch.uint8, scale=True)
 ])
 
 # ------
 def autoaugment_transform(basic_transform, p=1):
     autoaugment_transform = copy.deepcopy(basic_transform)
     transform_block = transforms.Compose([AutoAugment_with_p(policy=transforms.AutoAugmentPolicy.CIFAR10, p=p,
-                                                             pre_transforms=transforms.ToDtype(torch.uint8, scale=True)),
+                                                             #pre_transforms=transforms.ToDtype(torch.uint8, scale=True)
+                                                             ),
                                           transforms.ToDtype(torch.float32, scale=True)])
 
     # Add AutoAugment at last
@@ -166,7 +215,8 @@ def autoaugment_transform(basic_transform, p=1):
 def randaugment_transform(basic_transform, num_ops, p=1):
     randaugment_transform = copy.deepcopy(basic_transform)
     transform_block = transforms.Compose([RandAugment_with_p(num_ops=num_ops, p=p,
-                                                             pre_transforms=transforms.ToDtype(torch.uint8, scale=True)),
+                                                             #pre_transforms=transforms.ToDtype(torch.uint8, scale=True)
+                                                             ),
                                           transforms.ToDtype(torch.float32, scale=True)])
 
     # Add RandAugment at last
