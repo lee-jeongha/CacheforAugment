@@ -301,17 +301,17 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
                 raise ValueError('batch_size=None option disables auto-batching '
                                  'and is mutually exclusive with drop_last')
 
-        self.file_idx = list(self.dataset.imgs_dict.keys())
-        self.cache_idx = list(self.dataset.cache_info.keys()) #list(self.cache_dataset.samples.keys())
+        self.storage_item_idx = list(self.dataset.storage_items_dict.keys())
+        self.cache_item_idx = list(self.dataset.cache_info.keys()) #list(self.cache_dataset.samples.keys())
 
         self.batch_size = batch_size
         self.batch_num = (len(self.dataset) + self.batch_size - 1) // self.batch_size
         self.drop_last = drop_last
         self.generator = generator
-        self.file_sampler = self._file_sampler
-        self.cache_sampler = self._cache_sampler
-        self.batch_sampler = self._file_batch_sampler
-        self.cache_batch_sampler = self._cache_batch_sampler
+        self.sampler_for_storage = self._sampler_for_storage
+        self.sampler_for_cache = self._sampler_for_cache
+        self.batch_sampler = self._batch_sampler_for_storage
+        self.batch_sampler_for_cache = self._batch_sampler_for_cache
 
         if collate_fn is None:
             if self._auto_collation:
@@ -332,32 +332,32 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         torch.set_vital('Dataloader', 'enabled', 'True')  # type: ignore[attr-defined]
 
     @property
-    def _file_sampler(self):
-        # initialize _file_sampler
+    def _sampler_for_storage(self):
+        # initialize _storage_item_sampler
         if self._dataset_kind == _DatasetKind.Iterable:
             # See NOTE [ Custom Samplers and IterableDataset ]
             return _InfiniteConstantSampler()
         else:  # map-style
             if self.shuffle:
-                return SubsetRandomSampler(self.file_idx, generator=self.generator)  # type: ignore[arg-type]
+                return SubsetRandomSampler(self.storage_item_idx, generator=self.generator)  # type: ignore[arg-type]
             else:
-                return SequentialSubsetSampler(self.file_idx)  # type: ignore[arg-type]
+                return SequentialSubsetSampler(self.storage_item_idx)  # type: ignore[arg-type]
 
     @property
-    def _cache_sampler(self):
-        # initialize _cache_sampler
-        if self.shuffle and len(self.cache_idx) > 0:
-            return SubsetRandomSampler(self.cache_idx, generator=self.generator)
+    def _sampler_for_cache(self):
+        # initialize _cache_item_sampler
+        if self.shuffle and len(self.cache_item_idx) > 0:
+            return SubsetRandomSampler(self.cache_item_idx, generator=self.generator)
         else:
-            return SequentialSubsetSampler(self.cache_idx)
+            return SequentialSubsetSampler(self.cache_item_idx)
 
     @property
-    def _file_batch_sampler(self):
-        return SizedBatchSampler(self._file_sampler, self.batch_num, True)
+    def _batch_sampler_for_storage(self):
+        return SizedBatchSampler(self._sampler_for_storage, self.batch_num, True)
 
     @property
-    def _cache_batch_sampler(self):
-        return SizedBatchSampler(self._cache_sampler, self.batch_num, False)
+    def _batch_sampler_for_cache(self):
+        return SizedBatchSampler(self._sampler_for_cache, self.batch_num, False)
 
     def _get_iterator(self) -> '_BaseDataLoaderWithCacheIter':
         if self.num_workers == 0:
@@ -372,11 +372,11 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
         # reset index
         self.dataset.make_evict_candidates()
 
-        self.file_idx = list(self.dataset.imgs_dict.keys())
-        self.cache_idx = list(self.dataset.cache_info.keys())
+        self.storage_item_idx = list(self.dataset.storage_items_dict.keys())
+        self.cache_item_idx = list(self.dataset.cache_info.keys())
 
-        self.file_sampler = self._file_sampler
-        self.cache_sampler = self._cache_sampler
+        self.sampler_for_storage = self._sampler_for_storage
+        self.sampler_for_cache = self._sampler_for_cache
 
         # When using a single worker the returned iterator should be
         # created everytime to avoid resetting its state
@@ -393,32 +393,32 @@ class DataLoaderWithCache(torch.utils.data.DataLoader):
             return self._get_iterator()
 
     @property
-    def _file_index_sampler(self):
+    def _storage_index_sampler(self):
         if self._auto_collation:
-            return self._file_batch_sampler
+            return self._batch_sampler_for_storage
         else:
-            return self._file_sampler
+            return self._sampler_for_storage
 
     @property
     def _cache_index_sampler(self):
         if self._auto_collation:
-            return self._cache_batch_sampler
+            return self._batch_sampler_for_cache
         else:
-            return self._cache_sampler
+            return self._sampler_for_cache
 
 class _BaseDataLoaderWithCacheIter(_BaseDataLoaderIter):
     def __init__(self, loader: DataLoaderWithCache) -> None:
         super().__init__(loader)
-        self._file_index_sampler = loader._file_index_sampler
+        self._storage_index_sampler = loader._storage_index_sampler
         self._cache_index_sampler = loader._cache_index_sampler
-        self._file_sampler_iter = iter(self._file_index_sampler)
+        self._storage_sampler_iter = iter(self._storage_index_sampler)
         self._cache_sampler_iter = iter(self._cache_index_sampler)
-        self._sampler_iter = itertools.zip_longest(self._file_sampler_iter, self._cache_sampler_iter)
+        self._sampler_iter = itertools.zip_longest(self._storage_sampler_iter, self._cache_sampler_iter)
 
     def _reset(self, loader, first_iter=False):
-        self._file_sampler_iter = iter(self._file_index_sampler)
+        self._storage_sampler_iter = iter(self._storage_index_sampler)
         self._cache_sampler_iter = iter(self._cache_index_sampler)
-        self._sampler_iter = itertools.zip_longest(self._file_sampler_iter, self._cache_sampler_iter)
+        self._sampler_iter = itertools.zip_longest(self._storage_sampler_iter, self._cache_sampler_iter)
         self._num_yielded = 0
         self._IterableDataset_len_called = loader._IterableDataset_len_called
         if isinstance(self._dataset, IterDataPipe):

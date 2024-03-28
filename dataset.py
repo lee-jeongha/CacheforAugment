@@ -36,8 +36,8 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             target_transform=target_transform,
             is_valid_file=is_valid_file,
         )
-        self.samples_dict = { idx : sample for idx, sample in enumerate(self.samples) }
-        self.imgs_dict = copy.deepcopy(self.samples_dict)
+        self.items_dict = { idx : sample for idx, sample in enumerate(self.samples) }
+        self.storage_items_dict = copy.deepcopy(self.items_dict)
 
         self.cache_length = int(len(self) * cache_ratio)
         self.reuse_factor = reuse_factor
@@ -45,13 +45,13 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         self.extra_transform = extra_transform
         self.extra_target_transform = extra_target_transform
 
-        self.caches = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
-                                  'images': torch.empty((0, 1), dtype=torch.uint8),
-                                  'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
+        self.cache = TensorDict({'indices': torch.empty((0, 1), dtype=torch.int64),
+                                 'samples': torch.empty((0, 1), dtype=torch.uint8),
+                                 'targets': torch.empty((0, 1), dtype=torch.int64)}, batch_size=0)
         self.cache_info = dict()          # {'index': (position_index, -abs(loss))}
-        self.temp_cached = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, data, target) ] -> min heap
+        self.temp_cache = []             # [ (-abs(loss), index) ] or [ (-abs(loss), index, sample, target) ] -> min heap
         self.idx_to_be_dismissed = set()  # { index }
-        self.max_loss_candidates = -(10 ** 9)
+        self.loss_criterion = -(10 ** 9)
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         """
@@ -59,14 +59,14 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             index (int): Index
 
         Returns:
-            tuple: (sample, target) where target is class_index of the target class.
+            tuple: (index, sample, target, load_time) where target is class_index of the target class.
         """
         start = time.time()
 
-        is_imgs = False if index in self.cache_info else True
+        is_in_cache = True if index in self.cache_info else False
 
-        if is_imgs:
-            path, target = self.imgs_dict[index]
+        if not is_in_cache:
+            path, target = self.storage_items_dict[index]
             sample = self.loader(path)
 
             if self.transform is not None:
@@ -74,15 +74,15 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             if self.target_transform is not None:
                 target = self.target_transform(target)
         else:
+            pos_idx, _ = self.cache_info[index]
             try:
-                pos_idx, _, _ = self.cache_info[index]
-                sample = self.caches[pos_idx].images    #self.caches.get_at(key='images', index=pos_idx)
-                target = self.caches[pos_idx].targets   #self.caches.get_at(key='targets', index=pos_idx)
+                sample = self.cache[pos_idx].samples    #self.cache.get_at(key='samples', index=pos_idx)
+                target = self.cache[pos_idx].targets   #self.cache.get_at(key='targets', index=pos_idx)
             except KeyError:
                 try:
-                    assert self.caches[pos_idx].indices.item() == index
+                    assert self.cache[pos_idx].indices.item() == index
                 except AssertionError:
-                    print("error on __getitem__", self.caches[pos_idx].indices.item(), index)
+                    print("error on __getitem__", self.cache[pos_idx].indices.item(), index)
 
             if self.extra_transform is not None:
                 sample = self.extra_transform(sample)
@@ -99,74 +99,74 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             indices (sequence[int]): a sequence of indices
 
         Returns:
-            tuple: (sample, target) where target is class_index of the target class.
+            tuple: (index, sample, target, load_time) where target is class_index of the target class.
         """
         start = time.time()
 
         if isinstance(indices, tuple):
-            img_indices = indices[0]
+            storage_indices = indices[0]
             cache_indices = indices[1]
         else:
             # filter
             idx_copy = copy.deepcopy(indices)
-            is_imgs = idx_copy.apply_(lambda x: x not in self.cache_info).bool()
-            img_indices = indices[is_imgs == True]
-            cache_indices = indices[is_imgs == False]
+            is_in_cache = idx_copy.apply_(lambda x: x in self.cache_info).bool()
+            storage_indices = indices[is_in_cache == False]
+            cache_indices = indices[is_in_cache == True]
 
-        # get img samples
-        if img_indices is not None:
-            imgs_ = itemgetter(*img_indices)(self.imgs_dict) # list of (path, target)
-            imgs_path = list(map(itemgetter(0), imgs_))
+        # get data from storage
+        if storage_indices is not None:
+            items_ = itemgetter(*storage_indices)(self.storage_items_dict) # list of (path, target)
+            samples_path = list(map(itemgetter(0), items_))
 
             samples = []
-            with ThreadPoolExecutor(max_workers=len(imgs_path)) as executor:
-                exes = [executor.submit(self.loader, path) for path in imgs_path]
+            with ThreadPoolExecutor(max_workers=len(samples_path)) as executor:
+                exes = [executor.submit(self.loader, path) for path in samples_path]
                 samples += [exe.result() for exe in exes]
-            targets = list(map(itemgetter(1), imgs_))
+            targets = list(map(itemgetter(1), items_))
 
             if self.transform is not None:
-                samples = [self.transform(s) for s in samples]
+                samples = [self.transform(i) for i in samples]
 
             if self.target_transform is not None:
                 targets = [self.target_transform(t) for t in targets]
 
-            datas = list(zip(img_indices, samples, targets))
+            data = list(zip(storage_indices, samples, targets))
         else:
-            datas = []
+            data = []
 
-        # get cache samples
+        # get data from cache
         if cache_indices is not None:
             try:
                 cache_info_ = itemgetter(*cache_indices)(self.cache_info)
                 pos_indices = list(map(itemgetter(0), cache_info_))
-                samples = self.caches.get_at(key='images', idx=pos_indices)  #, index=pos_indices)
-                targets = self.caches.get_at(key='targets', idx=pos_indices) #, index=pos_indices)
+                samples = self.cache.get_at(key='samples', idx=pos_indices)  #, index=pos_indices)
+                targets = self.cache.get_at(key='targets', idx=pos_indices) #, index=pos_indices)
             except KeyError:
                 try:
-                    assert self.samples.get_at(key='indices', idx=pos_indices) == torch.tensor(indices)
+                    assert self.cache.get_at(key='indices', idx=pos_indices) == torch.tensor(indices)
                 except AssertionError:
-                    print("error on __getitems__:", self.samples.get_at(key='indices', idx=pos_indices), indices)
+                    print("error on __getitems__:", self.cache.get_at(key='indices', idx=pos_indices), indices)
 
             for i, (index, sample, target) in enumerate(zip(cache_indices, samples, targets)):
                 if self.extra_transform is not None:
                     sample = self.extra_transform(sample)
-                if self.target_transform is not None:
+                if self.extra_target_transform is not None:
                     target = self.extra_target_transform(target)
 
-                datas.append((index, sample, target))
+                data.append((index, sample, target))
 
         end = time.time()
-        times = [(end-start) / len(datas)] * len(datas)
+        times = [(end-start) / len(data)] * len(data)
 
-        datas = list((d[0], d[1], d[2], t) for (d, t) in zip(datas, times))
+        data = list((d[0], d[1], d[2], t) for (d, t) in zip(data, times))
 
-        return datas
+        return data
 
     def filter_batch_for_caching(self, possibly_batched_index, samples, targets, losses):
         """
         Returns:
             caching_idx (List(int)): List of Dataset Index
-            caching_samples (torch.tensor(dtype=float16)):
+            caching_samples (torch.tensor(dtype=uint8)):
             caching_targets (torch.tensor(dtype=float32):
             caching_losses (List(float)): List of Negative Absolute Loss of samples
         """
@@ -174,7 +174,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         idx_condi = idx_copy.apply_(lambda x: x not in self.cache_info).bool()
 
         neg_abs_losses = torch.mul(torch.abs(losses), -1)   # -abs(loss)
-        loss_condi = torch.where(neg_abs_losses < self.max_loss_candidates, 0., 1.)
+        loss_condi = torch.where(neg_abs_losses < self.loss_criterion, 0., 1.)
 
         condi = torch.mul(idx_condi, loss_condi)
 
@@ -185,16 +185,16 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         return caching_idx, caching_samples, caching_targets, caching_losses
 
-    def replace_sample(self, rm_indices, rm_position, add_losses, add_indices, add_images, add_targets):
-        self.caches.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
-        self.caches.set_at_(key='images', value=add_images, idx=rm_position)   #, index=rm_position)
-        self.caches.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
+    def replace_item(self, rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets):
+        self.cache.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
+        self.cache.set_at_(key='samples', value=add_samples, idx=rm_position)   #, index=rm_position)
+        self.cache.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
 
         for add, rm, pos, loss in zip(add_indices, rm_indices, rm_position, add_losses):
             rm_elements = self.cache_info.pop(rm)
             self.cache_info[add] = (pos, loss)
 
-        del rm_indices, rm_position, add_losses, add_indices, add_images, add_targets
+        del rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets
 
     def cache_batch(self, possibly_batched_index, samples, targets, losses):
         """
@@ -211,7 +211,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         dismissed_idx = list(filter(lambda x: x in self.idx_to_be_dismissed, possibly_batched_index.tolist()))
         dismissed_info = [self.cache_info[d_idx] for d_idx in dismissed_idx]
         for (idx, info) in zip(dismissed_idx, dismissed_info):
-            heapq.heappush(self.temp_cached, (info[1], idx))
+            heapq.heappush(self.temp_cache, (info[1], idx))
 
         #if (len(self.idx_to_be_dismissed) <= 0) and (len(self.cache_info) >= self.cache_length):
         if (self.reuse_count < self.reuse_factor) and (len(self.cache_info) >= self.cache_length):
@@ -232,19 +232,19 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         cache_data = list(zip(caching_losses, caching_idx, caching_samples, caching_targets))
         cache_data = sorted(cache_data, key=itemgetter(0))
 
-        if (not len(self.caches)) and (len(self.temp_cached) < self.cache_length):
+        if (not len(self.cache_info)) and (len(self.temp_cache) < self.cache_length):
             """
             Case 2. On the first epoch
-            `self.caches` has not been decided
-            All data structures related to evict will be used in the same size as `self.caches`
+            `self.cache` has not been decided
+            All data structures related to evict will be used in the same size as `self.cache`
             """
-            n = self.cache_length - len(self.temp_cached)
+            n = self.cache_length - len(self.temp_cache)
 
             # insert
-            self.temp_cached = list(heapq.merge(self.temp_cached, cache_data[:n]))
+            self.temp_cache = list(heapq.merge(self.temp_cache, cache_data[:n]))
             # replace
             for cd in cache_data[n:]:
-                evicted = heapq.heappushpop(self.temp_cached, cd)
+                evicted = heapq.heappushpop(self.temp_cache, cd)
                 del evicted
 
         else:
@@ -264,81 +264,76 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                 -> updating[-5:] = [-7, -4, -3, -1, 0]
                 * optimal = [-3, -3, -1, -1, 0]
             """
-            evict_candidates = heapq_nsmallest_with_index(len(caching_idx), self.temp_cached)
+            evict_candidates = heapq_nsmallest_with_index(len(caching_idx), self.temp_cache)
             cache_data = cache_data[:len(evict_candidates)]
-            # self.temp_cached = [(loss, index, sample, target)]  for samples in current epoch
-            #                   = [(loss, index)]                  for self.idx_to_be_dismissed
-            # evict_candidates  = [(elem_in_`self.temp_cached`, idx_from_`self.temp_cached`)]
+            # self.temp_cache  = [(loss, index, sample, target)] for data in current epoch
+            #                  = [(loss, index)]                 for self.idx_to_be_dismissed
+            # evict_candidates = [(elem_in_`self.temp_cache`, idx_from_`self.temp_cache`)]
 
             mask = [1 if c[0] >= e[0][0] else 0 for (c, e) in zip(cache_data, evict_candidates)]
             replace_num = mask.count(1)
 
-            if (not len(self.caches)) or (not replace_num):
+            if (not len(self.cache)) or (not replace_num):
                 pass
             else:
-                # replace to `self.caches` and `self.cache_info`
+                # replace to `self.cache` and `self.cache_info`
                 rm_indices = [e[0][1] for e in evict_candidates[:replace_num]]
                 rm_position = [self.cache_info[rm][0] for rm in rm_indices]
 
                 add_losses = list(map(itemgetter(0), cache_data[-replace_num:]))
                 add_indices = list(map(itemgetter(1), cache_data[-replace_num:]))
-                add_images = torch.stack(list(map(itemgetter(2), cache_data[-replace_num:])))
+                add_samples = torch.stack(list(map(itemgetter(2), cache_data[-replace_num:])))
                 add_targets = torch.tensor(list(map(itemgetter(3), cache_data[-replace_num:])))
 
-                self.replace_sample(rm_indices, rm_position, add_losses, add_indices, add_images, add_targets)
+                self.replace_item(rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets)
 
-                # save only losses and indices in `self.temp_cached`
+                # save only losses and indices in `self.temp_cache`
                 cache_data = list(map(itemgetter(0,1), cache_data))
 
-            # replace to `self.temp_cached`
+            # replace to `self.temp_cache`
             for (c, e) in zip(cache_data[-replace_num:], evict_candidates[:replace_num]):
                 pos = e[1]
-                self.temp_cached[pos] = c
-            heapq.heapify(self.temp_cached)
+                self.temp_cache[pos] = c
+            heapq.heapify(self.temp_cache)
 
             del evict_candidates
 
-        self.max_loss_candidates = self.temp_cached[0][0] if len(self.temp_cached) > 0 else -(10 ** 9)
+        self.loss_criterion = self.temp_cache[0][0] if len(self.temp_cache) > 0 else -(10 ** 9)
 
     def make_evict_candidates(self):
         """
-        0. cache all elements in `self.temp_cached`
-        1. Making heap by scanning all the elements in `self.cache_info`: that `reuse_factor` exceeds min value
-            -> heap has (reuse_factor, loss, index) as value
-        2. Extract from heap using `heapq.nsmallest(num, q)`
-        3. update `self.imgs_dict`
+        1. cache all elements in `self.temp_cache`
+        2. update `self.storage_items_dict` and `self.idx_to_be_dismissed`
         """
-        if (not len(self.caches)) and len(self.temp_cached):
+        if (not len(self.cache)) and len(self.temp_cache):
             self.cache_from_temp_cached()
-
-            self.idx_to_be_dismissed = set(self.cache_info.keys())
-            # fix imgs_dict
-            self.imgs_dict = copy.deepcopy(self.samples_dict)
-            for index in sorted(self.cache_info.keys(), reverse=True):
-                del self.imgs_dict[index]
+            self.update_storage_items()
 
         elif self.reuse_count >= self.reuse_factor:
             self.reuse_count = 0
+            self.update_storage_items()
 
-            self.idx_to_be_dismissed = set(self.cache_info.keys())
-            # fix imgs_dict
-            self.imgs_dict = copy.deepcopy(self.samples_dict)
-            for index in sorted(self.cache_info.keys(), reverse=True):
-                del self.imgs_dict[index]
         else:
             self.reuse_count += 1
 
-        del self.temp_cached[:]
+        del self.temp_cache[:]
         gc.collect()    # invoke garbage collector manually
 
         return
 
+    def update_storage_items(self):
+        self.idx_to_be_dismissed = set(self.cache_info.keys())
+
+        self.storage_items_dict = copy.deepcopy(self.items_dict)
+        for index in sorted(self.cache_info.keys(), reverse=True):
+            del self.storage_items_dict[index]
+
     def cache_from_temp_cached(self):
-        temp_cached_dict = {ts[1]: tuple(ts) for ts in self.temp_cached}  # {index: (loss, index, sample, target)}
+        temp_cached_dict = {ts[1]: tuple(ts) for ts in self.temp_cache}  # {index: (loss, index, sample, target)}
 
-        self.caches = MemMapData.from_dataset(temp_cached_dict, batch_size=64, num_workers=16)
+        self.cache = MemMapData.from_dataset(temp_cached_dict, batch_size=64, num_workers=16)
 
-        for pos_idx, samp_idx in enumerate(self.caches.indices):
+        for pos_idx, samp_idx in enumerate(self.cache.indices):
             index = samp_idx.item()
             self.cache_info[index] = (pos_idx, temp_cached_dict[index][0])
         return
@@ -416,7 +411,7 @@ def heapq_nsmallest_with_index(n, iterable, key=None):
 @tensorclass
 class MemMapData:
     indices: torch.Tensor
-    images: torch.Tensor
+    samples: torch.Tensor
     targets: torch.Tensor
 
     @classmethod
@@ -425,7 +420,7 @@ class MemMapData:
 
         data = cls(
             indices=MemoryMappedTensor.empty((len(cache_sample),), dtype=torch.int64),
-            images=MemoryMappedTensor.empty(
+            samples=MemoryMappedTensor.empty(
                 (
                     len(cache_sample),
                     *cache_sample[next(iter(cache_sample))][2].squeeze().shape,
@@ -442,13 +437,13 @@ class MemMapData:
                         sampler=SubsetRandomSampler(list(cache_sample.keys())))
         i = 0
         pbar = tqdm.tqdm(total=len(cache_sample))
-        for loss, index, image, target in dl:
-            _batch = image.shape[0]
+        for loss, index, sample, target in dl:
+            _batch = sample.shape[0]
             pbar.update(_batch)
             #print(data, type(data))
-            #print(cls(images=image, targets=target, batch_size=[_batch]))
+            #print(cls(samples=sample, targets=target, batch_size=[_batch]))
             data[i : i + _batch] = cls(
-                indices=index, images=image, targets=target, batch_size=[_batch]
+                indices=index, samples=sample, targets=target, batch_size=[_batch]
             )
             i += _batch
 
