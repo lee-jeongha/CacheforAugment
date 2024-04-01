@@ -66,32 +66,40 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
         is_in_cache = True if index in self.cache_info else False
 
         if not is_in_cache:
-            path, target = self.storage_items_dict[index]
-            sample = self.loader(path)
-
-            if self.transform is not None:
-                sample = self.transform(sample)
-            if self.target_transform is not None:
-                target = self.target_transform(target)
+            index, sample, target = self.getitem_from_storage(index)
         else:
-            pos_idx, _ = self.cache_info[index]
+            index, sample, target = self.getitem_from_memcache(index)
+
+        return index, sample, target, (time.time() - start)
+
+    def getitem_from_storage(self, index: int):
+        path, target = self.storage_items_dict[index]
+        sample = self.loader(path)
+
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return index, sample, target
+
+    def getitem_from_cache(self, index: int):
+        pos_idx, _ = self.cache_info[index]
+        try:
+            sample = self.cache[pos_idx].samples    #self.cache.get_at(key='samples', index=pos_idx)
+            target = self.cache[pos_idx].targets   #self.cache.get_at(key='targets', index=pos_idx)
+        except KeyError:
             try:
-                sample = self.cache[pos_idx].samples    #self.cache.get_at(key='samples', index=pos_idx)
-                target = self.cache[pos_idx].targets   #self.cache.get_at(key='targets', index=pos_idx)
-            except KeyError:
-                try:
-                    assert self.cache[pos_idx].indices.item() == index
-                except AssertionError:
-                    print("error on __getitem__", self.cache[pos_idx].indices.item(), index)
+                assert self.cache[pos_idx].indices.item() == index
+            except AssertionError:
+                print("error on __getitem__", self.cache[pos_idx].indices.item(), index)
 
-            if self.extra_transform is not None:
-                sample = self.extra_transform(sample)
-            if self.target_transform is not None:
-                target = self.extra_target_transform(target)
+        if self.extra_transform is not None:
+            sample = self.extra_transform(sample)
+        if self.target_transform is not None:
+            target = self.extra_target_transform(target)
 
-        end = time.time()
-
-        return index, sample, target, (end-start)
+        return index, sample, target
 
     def __getitems__(self, indices: Sequence[int]) -> Tuple[Any, Any]:
         """
@@ -113,32 +121,54 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
             storage_indices = indices[is_in_cache == False]
             cache_indices = indices[is_in_cache == True]
 
-        # get data from storage
-        if storage_indices is not None:
-            items_ = itemgetter(*storage_indices)(self.storage_items_dict) # list of (path, target)
+        #data = []
+        #with ThreadPoolExecutor(max_workers=len(indices)) as executor:
+        #    exes = [executor.submit(self.__getitem__, idx) for idx in indices]
+        #    data += [tuple(exe.result()) for exe in exes]
+
+        from_storage = self.getitems_from_storage(storage_indices)
+        from_cache = self.getitems_from_cache(cache_indices)
+        data = from_storage + from_cache
+
+        end = time.time()
+        times = [(end-start) / len(data)] * len(data)
+
+        data = list((d[0], d[1], d[2], t) for (d, t) in zip(data, times))
+
+        return data
+
+    def getitems_from_storage(self, indices: Sequence[int]):
+        if indices is not None:
+            start = time.time()
+
+            items_ = itemgetter(*indices)(self.storage_items_dict) # list of (path, target)
             samples_path = list(map(itemgetter(0), items_))
 
-            samples = []
-            with ThreadPoolExecutor(max_workers=len(samples_path)) as executor:
-                exes = [executor.submit(self.loader, path) for path in samples_path]
-                samples += [exe.result() for exe in exes]
+            #samples = []
+            #with ThreadPoolExecutor(max_workers=len(samples_path)) as executor:
+            #    exes = [executor.submit(self.loader, path) for path in samples_path]
+            #    samples += [exe.result() for exe in exes]
+            samples = [self.loader(path) for path in samples_path]
             targets = list(map(itemgetter(1), items_))
 
             if self.transform is not None:
-                samples = [self.transform(i) for i in samples]
+                samples = [self.transform(s) for s in samples]
 
             if self.target_transform is not None:
                 targets = [self.target_transform(t) for t in targets]
 
-            data = list(zip(storage_indices, samples, targets))
+            return list(zip(indices, samples, targets))#, [(time.time() - start) / len(indices)] * len(indices)))
         else:
-            data = []
+            return list()
 
-        # get data from cache
-        if cache_indices is not None:
+    def getitems_from_cache(self, indices: Sequence[int]):
+        if indices is not None:
+            start = time.time()
+
+            cache_info_ = itemgetter(*indices)(self.cache_info)
+            pos_indices = list(map(itemgetter(0), cache_info_))
+
             try:
-                cache_info_ = itemgetter(*cache_indices)(self.cache_info)
-                pos_indices = list(map(itemgetter(0), cache_info_))
                 samples = self.cache.get_at(key='samples', idx=pos_indices)  #, index=pos_indices)
                 targets = self.cache.get_at(key='targets', idx=pos_indices) #, index=pos_indices)
             except KeyError:
@@ -147,20 +177,15 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                 except AssertionError:
                     print("error on __getitems__:", self.cache.get_at(key='indices', idx=pos_indices), indices)
 
-            for i, (index, sample, target) in enumerate(zip(cache_indices, samples, targets)):
-                if self.extra_transform is not None:
-                    sample = self.extra_transform(sample)
-                if self.extra_target_transform is not None:
-                    target = self.extra_target_transform(target)
+            if self.extra_transform is not None:
+                samples = [self.extra_transform(s) for s in samples]
 
-                data.append((index, sample, target))
+            if self.extra_target_transform is not None:
+                targets = [self.extra_target_transform(t) for t in targets]
 
-        end = time.time()
-        times = [(end-start) / len(data)] * len(data)
-
-        data = list((d[0], d[1], d[2], t) for (d, t) in zip(data, times))
-
-        return data
+            return list(zip(indices, samples, targets))
+        else:
+            return list()
 
     def filter_batch_for_caching(self, possibly_batched_index, samples, targets, losses):
         """
@@ -180,12 +205,12 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
 
         caching_idx = possibly_batched_index[condi == 1].tolist()
         caching_samples = transform_for_cache(samples[condi == 1])    # samples[condi == 1].to(torch.float16)
-        caching_targets = targets[condi == 1].tolist()
+        caching_targets = targets[condi == 1]                         # targets[condi == 1].tolist()
         caching_losses = neg_abs_losses[condi == 1].tolist()
 
         return caching_idx, caching_samples, caching_targets, caching_losses
 
-    def replace_item(self, rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets):
+    def replace_cache_item(self, rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets):
         self.cache.set_at_(key='indices', value=add_indices, idx=rm_position) #, index=rm_position)
         self.cache.set_at_(key='samples', value=add_samples, idx=rm_position)   #, index=rm_position)
         self.cache.set_at_(key='targets', value=add_targets, idx=rm_position) #, index=rm_position)
@@ -285,7 +310,7 @@ class ImageFolderWithCache(torchvision.datasets.DatasetFolder):
                 add_samples = torch.stack(list(map(itemgetter(2), cache_data[-replace_num:])))
                 add_targets = torch.tensor(list(map(itemgetter(3), cache_data[-replace_num:])))
 
-                self.replace_item(rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets)
+                self.replace_cache_item(rm_indices, rm_position, add_losses, add_indices, add_samples, add_targets)
 
                 # save only losses and indices in `self.temp_cache`
                 cache_data = list(map(itemgetter(0,1), cache_data))
